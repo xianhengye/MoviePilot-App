@@ -51,6 +51,17 @@
                ReferencedContainer = "container:MoviePilot.xcodeproj">
             </BuildableReference>
          </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "9286A303595E9D90BC92F7D1"
+               BuildableName = "MoviePilotLayoutTests.xctest"
+               BlueprintName = "MoviePilotLayoutTests"
+               ReferencedContainer = "container:MoviePilot.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
       <CommandLineArguments>
       </CommandLineArguments>
