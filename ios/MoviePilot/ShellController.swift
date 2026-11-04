@@ -100,8 +100,6 @@ private struct NativeHeaderConfiguration: Equatable {
   let tabs: HeaderTabsSnapshot?
   let actions: [ActionSnapshot]
   let overlayOpen: Bool
-  let expanded: Bool
-  let inlineTabs: Bool
 }
 
 /// 系统顶部和底部导航的呈现层，所有路由与业务动作只发送网页意图。
@@ -133,13 +131,6 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
   private let moreMenu = MoreMenuController()
   private var searchPage: SearchPageController?
   private let bottomNavigation = BottomNavigationView()
-  private let sidebar = SidebarNavigationController()
-  private let contentGuide = UILayoutGuide()
-  private var contentLeading: NSLayoutConstraint!
-  private var sidebarWidth: NSLayoutConstraint!
-  private var expandedNavigation = false
-  private var layoutContext: String?
-
   private var panelNavigation: UINavigationController?
   private var panelImages: NativePanelImageLoader?
   private var panelAction: ActionSnapshot?
@@ -200,111 +191,15 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
       controller.synchronizeContentBackground()
       controller.setNeedsStatusBarAppearanceUpdate()
     }
-    installAdaptiveNavigation()
-    registerForTraitChanges([
-      UITraitHorizontalSizeClass.self, UITraitVerticalSizeClass.self,
-      UITraitPreferredContentSizeCategory.self, UITraitLayoutDirection.self,
-    ]) { (controller: ShellController, _: UITraitCollection) in
-      controller.layoutContext = nil
-      controller.view.setNeedsLayout()
-    }
     installBackGesture(on: view)
-    installBackGesture(on: compatibilityNavigation.view)
     prepareDocumentHost()
   }
 
   /// 系统安全区改变后刷新当前布局，不修改业务路由。
   override func viewDidLayoutSubviews() {
     super.viewDidLayoutSubviews()
-    let context =
-      "\(view.bounds.size)|\(view.safeAreaInsets)|\(traitCollection.horizontalSizeClass.rawValue)|\(traitCollection.verticalSizeClass.rawValue)|\(traitCollection.preferredContentSizeCategory.rawValue)|\(traitCollection.layoutDirection.rawValue)"
-    if layoutContext != context {
-      layoutContext = context
-      if let latest { configureHeader(selectedHost, snapshot: latest) }
-      updatePanelGeometry()
-    }
     synchronizeNavigationPreviewContext()
     coordinator.layoutChanged()
-  }
-
-  /// Folding and rotation resize the existing document; never reconnect or select another route.
-  override func viewWillTransition(
-    to size: CGSize, with coordinator: any UIViewControllerTransitionCoordinator
-  ) {
-    clearInteractiveBack()
-    navigationPreviews.clear()
-    super.viewWillTransition(to: size, with: coordinator)
-    coordinator.animate(
-      alongsideTransition: { [weak self] _ in
-        self?.layoutContext = nil
-        self?.view.setNeedsLayout()
-        self?.view.layoutIfNeeded()
-      },
-      completion: { [weak self] _ in
-        self?.updatePanelGeometry()
-        self?.coordinator.layoutChanged()
-      })
-  }
-
-  private func installAdaptiveNavigation() {
-    view.addLayoutGuide(contentGuide)
-    contentLeading = contentGuide.leadingAnchor.constraint(equalTo: view.leadingAnchor)
-    NSLayoutConstraint.activate([
-      contentLeading,
-      contentGuide.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-      contentGuide.topAnchor.constraint(equalTo: view.topAnchor),
-      contentGuide.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-    ])
-    addChild(sidebar)
-    sidebar.view.translatesAutoresizingMaskIntoConstraints = false
-    view.addSubview(sidebar.view)
-    sidebarWidth = sidebar.view.widthAnchor.constraint(equalToConstant: 240)
-    NSLayoutConstraint.activate([
-      sidebar.view.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
-      sidebar.view.topAnchor.constraint(equalTo: view.topAnchor),
-      sidebar.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-      sidebarWidth,
-    ])
-    sidebar.didMove(toParent: self)
-    sidebar.view.isHidden = true
-    sidebar.onSelectRoot = { [weak self] in self?.selectRoot($0) }
-    sidebar.onSelectMenu = { [weak self] in self?.coordinator.openMenuItem($0) }
-  }
-
-  private func navigationIsVisible(_ snapshot: NavigationSnapshot) -> Bool {
-    snapshot.chrome.bottomVisible && !snapshot.roots.isEmpty
-      && (snapshot.presentation?.sheet != nil || webSheet != nil
-        || snapshot.presentation?.fullscreen != true)
-  }
-
-  private func updateNavigationLayout(_ snapshot: NavigationSnapshot) {
-    let safe = view.safeAreaInsets
-    let layout = AdaptiveNavigationLayout(
-      width: view.bounds.width - safe.left - safe.right,
-      height: view.bounds.height - safe.top - safe.bottom,
-      regularWidth: traitCollection.horizontalSizeClass == .regular,
-      regularHeight: traitCollection.verticalSizeClass == .regular,
-      accessibilityText: traitCollection.preferredContentSizeCategory.isAccessibilityCategory,
-      navigationVisible: navigationIsVisible(snapshot))
-    expandedNavigation = layout.usesSidebar
-    sidebarWidth.constant = max(1, layout.sidebarWidth)
-    let leadingSafe = traitCollection.layoutDirection == .rightToLeft ? safe.right : safe.left
-    contentLeading.constant = expandedNavigation ? layout.sidebarWidth + leadingSafe : 0
-    sidebar.view.isHidden = !nativeVisible || !expandedNavigation
-    sidebar.view.accessibilityElementsHidden =
-      !nativeVisible || startupView != nil
-      || recoveryView != nil || snapshot.presentation?.overlayOpen == true
-  }
-
-  private func selectRoot(_ rootID: String) {
-    if latest?.roots.first(where: { $0.id == rootID })?.path == "/apps" {
-      moreMenu.scrollToBeginning()
-    }
-    coordinator.command("navigation.selectRoot", payload: .object(["rootId": .string(rootID)]))
-  }
-
-  private var navigationPreviewHost: UIView {
-    expandedNavigation ? (activeContainer?.view ?? view) : view
   }
 
   /// 预览只跨同一文档、主题与窗口保留，外观或身份变化不复用旧画面。
@@ -315,7 +210,7 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
         latest?.chrome.backgroundColor ?? "", latest?.chrome.surfaceColor ?? "",
       ].joined(separator: "|")
     }
-    navigationPreviews.synchronize(context: context, size: navigationPreviewHost.bounds.size)
+    navigationPreviews.synchronize(context: context, size: view.bounds.size)
   }
 
   /// Vue 提交路由前保存原生导航和现有正文；浮层、交接或键盘覆盖时不保存错误画面。
@@ -325,7 +220,7 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
       latest?.presentation?.overlayOpen != true, let path = latest?.route.fullPath
     else { return }
     synchronizeNavigationPreviewContext()
-    navigationPreviews.capture(navigationPreviewHost, path: path)
+    navigationPreviews.capture(view, path: path)
   }
 
   /// 生命周期和会话释放时停止旧动画与延迟采样，画面不会跨账号或写入磁盘。
@@ -380,9 +275,6 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
       guard sheetID != nil else { return false }
     } else {
       guard presentedViewController == nil else { return false }
-      // In expanded windows the content column owns back gestures; swiping the sidebar never navigates.
-      guard expandedNavigation ? gesture.view === activeContainer?.view : gesture.view === view
-      else { return false }
       sheetID = nil
     }
     let velocity = gesture.velocity(in: gesture.view)
@@ -401,7 +293,7 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
       synchronizeNavigationPreviewContext()
       edgeBackTarget = latest?.route.backTarget
       edgeBackTransition = NavigationBackTransition(
-        host: navigationPreviewHost, previous: navigationPreviews.image(for: edgeBackTarget))
+        host: view, previous: navigationPreviews.image(for: edgeBackTarget))
       edgeBackAnimationFinished = false
       edgeBackPaintPending = false
     }
@@ -497,10 +389,6 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
     latest = nil
     dismissWebSheet(animated: false)
     bottomNavigation.isHidden = true
-    sidebar.view.isHidden = true
-    expandedNavigation = false
-    contentLeading.constant = 0
-    layoutContext = nil
     compatibilityHost.additionalSafeAreaInsets.bottom = 0
     removeMoreMenu()
     removeSearchPage(resetState: true)
@@ -563,7 +451,7 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
     synchronizeNativePanel(snapshot)
     synchronizeNativeConfirmation()
     keepStartupInFront()
-    if let overlay = edgeBackTransition?.overlay { overlay.superview?.bringSubviewToFront(overlay) }
+    if let overlay = edgeBackTransition?.overlay { view.bringSubviewToFront(overlay) }
     finishInteractiveBackIfReady()
     scheduleNavigationPreview()
   }
@@ -615,7 +503,6 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
       startupView = nil
       activeContainer?.view.accessibilityElementsHidden = false
       bottomNavigation.accessibilityElementsHidden = false
-      sidebar.view.accessibilityElementsHidden = latest?.presentation?.overlayOpen == true
       view.accessibilityElements = nil
     }
     setNeedsStatusBarAppearanceUpdate()
@@ -638,7 +525,6 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
     view.bringSubviewToFront(startupView)
     activeContainer?.view.accessibilityElementsHidden = true
     bottomNavigation.accessibilityElementsHidden = true
-    sidebar.view.accessibilityElementsHidden = true
     view.accessibilityElements = [startupView]
   }
 
@@ -693,7 +579,6 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
     recoveryView = panel
     activeContainer?.view.accessibilityElementsHidden = true
     bottomNavigation.accessibilityElementsHidden = true
-    sidebar.view.accessibilityElementsHidden = true
     view.accessibilityElements = [panel]
     UIAccessibility.post(notification: .screenChanged, argument: title)
   }
@@ -729,7 +614,6 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
       headerConfigurations.removeAll()
       hosts = snapshot.roots.map { ContentHostController(rootId: $0.id) }
       rootNavigations = hosts.map { UINavigationController(rootViewController: $0) }
-      for navigation in rootNavigations { installBackGesture(on: navigation.view) }
       rootIds = ids
     }
     configureHeader(selectedHost, snapshot: snapshot)
@@ -768,12 +652,6 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
 
   /// 顶栏只使用原生导航语义；动作仍回到网页注册的回调。
   private func configureHeader(_ host: ContentHostController, snapshot: NavigationSnapshot) {
-    updateNavigationLayout(snapshot)
-    let inlineTabs =
-      expandedNavigation
-      && view.bounds.width - contentLeading.constant >= 600
-      && !traitCollection.preferredContentSizeCategory.isAccessibilityCategory
-      && (snapshot.headerTabs?.items.count ?? 0) <= 4
     let moveAccessory = ["/dashboard", "/recommend", "/discover"].contains(
       snapshot.route.fullPath.components(separatedBy: "?")[0])
     let trailing = snapshot.actions.filter { $0.position != .accessory || moveAccessory }
@@ -787,8 +665,7 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
       session: coordinator.navigationPreviewSession,
       title: snapshot.route.title, canGoBack: canGoBack,
       tabs: snapshot.headerTabs, actions: trailing,
-      overlayOpen: snapshot.presentation?.overlayOpen == true,
-      expanded: expandedNavigation, inlineTabs: inlineTabs)
+      overlayOpen: snapshot.presentation?.overlayOpen == true)
     guard headerConfigurations[identity] != configuration else {
       configureBottomBar(host, snapshot: snapshot)
       return
@@ -812,15 +689,7 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
     let menu = connectionItem(
       overflow: trailing, enabled: snapshot.presentation?.overlayOpen != true, reusing: previousMenu
     )
-    var rightItems = [menu]
-    if expandedNavigation, !moveAccessory,
-      let accessory = snapshot.actions.first(where: { $0.position == .accessory })
-    {
-      let button = bottomActionButton(accessory)
-      button.accessibilityIdentifier = "native-expanded-action"
-      rightItems.append(UIBarButtonItem(customView: button))
-    }
-    host.navigationItem.rightBarButtonItems = rightItems
+    if menu !== previousMenu { host.navigationItem.rightBarButtonItems = [menu] }
     host.navigationItem.titleView = nil
     host.navigationItem.searchController = nil
     if let tabs = snapshot.headerTabs {
@@ -869,29 +738,6 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
       button.widthAnchor.constraint(greaterThanOrEqualToConstant: 64).isActive = true
       button.heightAnchor.constraint(equalToConstant: 44).isActive = true
       host.navigationItem.titleView = button
-      if inlineTabs {
-        let segments = UISegmentedControl(items: tabs.items.map(\.title))
-        segments.accessibilityIdentifier = "native-header-segments"
-        segments.accessibilityLabel = "\(snapshot.route.title)，页内分类"
-        segments.selectedSegmentIndex =
-          tabs.items.firstIndex { $0.id == tabs.selectedId } ?? UISegmentedControl.noSegment
-        segments.isEnabled = snapshot.presentation?.overlayOpen != true
-        segments.addAction(
-          UIAction { [weak self, weak segments] _ in
-            guard let segments, tabs.items.indices.contains(segments.selectedSegmentIndex) else {
-              return
-            }
-            let requested = tabs.items[segments.selectedSegmentIndex].id
-            segments.selectedSegmentIndex =
-              tabs.items.firstIndex { $0.id == tabs.selectedId } ?? UISegmentedControl.noSegment
-            self?.coordinator.command(
-              "headerTab.select",
-              payload: .object([
-                "tabId": .string(requested), "ownerId": .string(tabs.ownerId),
-              ]))
-          }, for: .valueChanged)
-        host.navigationItem.titleView = segments
-      }
     }
     configureBottomBar(host, snapshot: snapshot)
   }
@@ -900,7 +746,9 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
   private func configureBottomBar(_ host: ContentHostController, snapshot: NavigationSnapshot) {
     host.toolbarItems = nil
     host.navigationController?.setToolbarHidden(true, animated: false)
-    let visible = navigationIsVisible(snapshot) && !expandedNavigation
+    let systemSheet = snapshot.presentation?.sheet != nil || webSheet != nil
+    let visible =
+      snapshot.chrome.bottomVisible && (systemSheet || snapshot.presentation?.fullscreen != true)
     host.additionalSafeAreaInsets.bottom =
       visible
       ? max(0, bottomNavigation.intrinsicContentSize.height - view.safeAreaInsets.bottom) : 0
@@ -921,10 +769,12 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
     let accessory =
       (!moveAccessory ? snapshot.actions.first { $0.position == .accessory } : nil)
       .map { bottomActionButton($0) } ?? searchButton(snapshot)
-    bottomNavigation.apply(snapshot, action: accessory) { [weak self] in self?.selectRoot($0) }
-    if expandedNavigation {
-      sidebar.apply(snapshot, search: searchButton(snapshot))
-      view.bringSubviewToFront(sidebar.view)
+    bottomNavigation.apply(snapshot, action: accessory) { [weak self] rootId in
+      if self?.latest?.roots.first(where: { $0.id == rootId })?.path == "/apps" {
+        self?.moreMenu.scrollToBeginning()
+      }
+      self?.coordinator.command(
+        "navigation.selectRoot", payload: .object(["rootId": .string(rootId)]))
     }
     bottomNavigation.isHidden = !nativeVisible || !visible
     if !bottomNavigation.isHidden { view.bringSubviewToFront(bottomNavigation) }
@@ -1537,15 +1387,15 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
     }
     controller.loadViewIfNeeded()
     navigation.preferredContentSize = CGSize(
-      width: controller.preferredPanelWidth(
-        maximum: controller.maximumPanelWidth(in: selectedHost.view)),
+      width: controller.preferredPanelWidth(maximum: controller.maximumPanelWidth(in: view)),
       height: min(
         580,
         max(280, view.bounds.height - view.safeAreaInsets.top - view.safeAreaInsets.bottom - 170)))
     if let popover = navigation.popoverPresentationController {
       popover.delegate = self
-      popover.sourceView = selectedHost.view
-      popover.sourceRect = panelAnchor(in: selectedHost.view)
+      popover.sourceView = view
+      popover.sourceRect = CGRect(
+        x: view.bounds.maxX - 38, y: view.safeAreaInsets.top + 44, width: 1, height: 1)
       popover.permittedArrowDirections = .up
       popover.passthroughViews = nil
     }
@@ -1556,32 +1406,6 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
     present(navigation, animated: true)
     coordinator.invoke(action, panelEvent: "open")
     synchronizeNativePanel(latest)
-  }
-
-  private func panelAnchor(in source: UIView) -> CGRect {
-    let safe = source.safeAreaInsets
-    let x =
-      traitCollection.layoutDirection == .rightToLeft
-      ? safe.left + 24 : source.bounds.width - safe.right - 24
-    return CGRect(x: max(0, x), y: safe.top, width: 1, height: 1)
-  }
-
-  /// Popovers retain their source inside the resized content column when a fold changes geometry.
-  private func updatePanelGeometry() {
-    guard let navigation = panelNavigation,
-      let controller = navigation.viewControllers.first as? NativePanelController
-    else { return }
-    let source = selectedHost.view!
-    navigation.preferredContentSize = CGSize(
-      width: controller.preferredPanelWidth(maximum: controller.maximumPanelWidth(in: source)),
-      height: min(
-        580,
-        max(
-          160,
-          source.bounds.height - source.safeAreaInsets.top
-            - source.safeAreaInsets.bottom - 100)))
-    navigation.popoverPresentationController?.sourceView = source
-    navigation.popoverPresentationController?.sourceRect = panelAnchor(in: source)
   }
 
   /// 确认使用系统 alert；已有 HTML Sheet 保留唯一 WebView，在其上呈现而不重新搬运网页。
@@ -1893,10 +1717,10 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
     controller.view.translatesAutoresizingMaskIntoConstraints = false
     view.addSubview(controller.view)
     NSLayoutConstraint.activate([
-      controller.view.topAnchor.constraint(equalTo: contentGuide.topAnchor),
-      controller.view.bottomAnchor.constraint(equalTo: contentGuide.bottomAnchor),
-      controller.view.leadingAnchor.constraint(equalTo: contentGuide.leadingAnchor),
-      controller.view.trailingAnchor.constraint(equalTo: contentGuide.trailingAnchor),
+      controller.view.topAnchor.constraint(equalTo: view.topAnchor),
+      controller.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+      controller.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+      controller.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
     ])
     controller.didMove(toParent: self)
   }

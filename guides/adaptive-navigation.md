@@ -1,43 +1,42 @@
-# iPhone Duo 与直板 iPhone 的自适应导航
+# iPhone Duo 系统导航与原版隔离
 
-此 fork 在保持单一 WKWebView、前端路由及权限校验的基础上，为展开后的宽屏增加原生侧栏。
+## 两套界面实现
 
-## 显示行为
+- `ios/MoviePilot/ShellController.swift` 与 `BottomNavigationView.swift` 保留上游 `aee8fc31ef29ad36a5833529df1f71b95fe8e41f` 的原始内容。Python 回归校验 SHA-256，防止 Duo 调整意外改动原版导航。
+- `DeviceShellFactory` 在建立认证后的界面时选择实现。只有已确认的 Duo 型号 `iPhone19,4` 使用 `Duo/DuoShellController.swift`；iPhone 18、其他直板机型、iPad 和未知型号使用原版。
+- 真机通过 `uname` 获取型号，模拟器使用系统的 `SIMULATOR_MODEL_IDENTIFIER`。不根据屏幕宽度、设备名称或系统版本猜测型号。
+- 两套界面通过 `NativeShell` 共用原有登录、WebCoordinator、单一 WebView 和业务通信。协议遵循在独立文件声明，不修改原版界面文件。
+- Duo 独立维护导航宿主；上游修复需分别审查并移植到两个实现。新增 Duo 型号须验证后加入策略。
 
-| 窗口状态 | 导航与操作 |
-| --- | --- |
-| iPhone 18 等直板机型竖屏、Duo 外屏或窄窗口 | 保留原底部标签栏和独立动作按钮 |
-| regular 宽度和高度、可用宽度至少 640 pt、高度至少 500 pt | 标签栏变为侧栏，展示原主入口及已授权的“更多”目录；搜索位于侧栏底部 |
-| 直板机型横屏／compact 高度 | 保留底部导航，不挤出狭窄的内容列 |
-| 宽屏且内容列至少 600 pt、页内分类不超过 4 项 | 顶部直接展示分段分类；窄屏、大字号或更多分类仍使用下拉菜单 |
-| 网页全屏展示 | 同时收起侧栏、底栏及其占位 |
-| 网页浮层打开 | 禁用背景导航，防止越过当前业务弹窗 |
+## Duo 使用系统侧边控制区
 
-侧栏使用 UIKit 的 sidebar 列表样式、系统材质和 Dynamic Type。通常宽 240 pt，中等宽度窗口可收窄至 200 pt，内容列至少保留 440 pt。无障碍字号使用 280 pt 侧栏；空间不足时保留底部导航。布局使用 leading/trailing 约束，支持从右到左语言。
+Duo 使用 `UITabBarController` 管理主入口和 `UISearchTab`，各入口由 `UINavigationController` 管理工具栏。菜单和页面动作声明 `axisBehavior = .verticalPreferred`，自定义根容器通过 `childForPreferredVerticalBarBehavior` 将配置传给活动系统容器。
 
-展开、折叠、旋转、尺寸类别和安全区变化只重新量测现有宿主，不创建另一份 WKWebView，不重新登录、不加载页面、不发送路由切换命令。选择入口或分类时，选中状态仍等待前端确认。返回手势在展开时只作用于内容列；尺寸变化时取消过期的手势快照。快捷面板锚点及宽度随内容列更新。
+不另建应用侧边竖栏、不固定右侧宽度、不额外增加底部或侧边安全区。系统将工具栏、Tab bar 和搜索整合到其侧边控制区；折叠外屏及展开分屏时的位置随窗口环境改变。左侧分屏 App 的控件可以位于左外缘，右侧 App 位于右外缘，位置由 UIKit 决定。
 
-这里不根据 `iPhone19,4` 等设备标识决定布局，也不将 hinge 角度直接解释为内容尺寸。系统的尺寸类别、窗口几何和安全区才是布局依据；这也覆盖分屏、窗口缩放及未来机型。
+选择主入口仍先发送路由意图，等待前端权限守卫确认快照后才更新选中项。搜索继续使用原前端动作。折叠、旋转、分屏只改变同一系统容器的布局，不创建新网页或重登。布局通信读取实际宿主的安全区，不重复扣除系统控制区。
 
-## 官方依据
+## 官方接口
 
-- [Apple HIG — Layout](https://developer.apple.com/design/human-interface-guidelines/layout)：依据 size classes 和可用空间布局；宽屏可将 tab bar 改为 sidebar、展开 overflow 中的操作；保留相同功能。
-- [Apple HIG — Sidebars](https://developer.apple.com/design/human-interface-guidelines/sidebars)
-- [Apple HIG — Tab bars](https://developer.apple.com/design/human-interface-guidelines/tab-bars)
-- [UIHingeInteraction](https://developer.apple.com/documentation/uikit/uihingeinteraction)：系统可提供 hinge 状态，但此导航无需读取角度即可响应布局变化。
+- [UITabBarController](https://developer.apple.com/documentation/uikit/uitabbarcontroller)
+- [UISearchTab](https://developer.apple.com/documentation/uikit/uisearchtab)
+- [UIVerticalBarEdge](https://developer.apple.com/documentation/uikit/uiverticalbaredge)
+- [preferredVerticalBarBehavior](https://developer.apple.com/documentation/uikit/uiviewcontroller/preferredverticalbarbehavior)
+- [Apple HIG — Layout](https://developer.apple.com/design/human-interface-guidelines/layout)
+
+`verticalBarEdge` 表示系统当前偏好的边缘；无需手工重排侧边控件。此方案保留默认 automatic 行为，不按每个页面反复启停系统竖栏。
 
 ## 验证
 
 ```sh
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer zsh scripts/test-core.sh
+python3 -m unittest discover -s scripts/tests
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild test \
   -project ios/MoviePilot.xcodeproj -scheme MoviePilot \
   -destination 'platform=iOS Simulator,id=你的模拟器UUID' \
   -only-testing:MoviePilotLayoutTests CODE_SIGNING_ALLOWED=NO
 ```
 
-`MoviePilotLayoutTests` 在真实 ShellController 上注入合成导航快照和本地 HTML，验证宽窄反复切换、同一网页与输入保留、隐藏底栏后释放安全区、全屏、横屏、背景导航禁用、大字号及 RTL。测试不连接 MoviePilot 实例，也不使用真实登录凭据。
+合成测试验证系统控制器层级、入口与搜索、单一网页与输入状态保留、路由确认、全屏／浮层禁用，以及非 Duo 仍运行原版。模拟器尺寸测试不能证明 iOS 27.1+ 的真机侧边控制区摆放，折叠和左右分屏必须另行真机验收。
 
-真机验收需要在 Duo 上分别展开／折叠并旋转，检查搜索键盘、弹窗、返回和真实业务列表；直板 iPhone 18 则检查竖屏和横屏。模拟尺寸测试不能替代特定硬件的系统行为验证。
-
-个人签名只用于本机构建，不提交 Apple 账号、Team ID、证书或 provisioning profile。主 App 与 Widgets 继续使用同一共享组。
+个人签名只用于本机构建，不提交 Team ID、账号、证书或描述文件。

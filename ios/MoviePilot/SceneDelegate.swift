@@ -191,7 +191,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         self?.tokens.remove(instance.id)
         self?.showLogin(instance)
       })
-    let shell = ShellController(
+    let shell = DeviceShellFactory.make(
       coordinator: coordinator,
       onConnection: { [weak self] in self?.showConnection() })
     coordinator.shell = shell

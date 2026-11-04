@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		00C595992CFDFB69E6ECDEB0 /* DeviceShellFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 250216E31570696233F3F41B /* DeviceShellFactory.swift */; };
 		0B79AFE6E3E507A780FAEDAB /* LoginController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8072C0F89DB70887DB4A4AEC /* LoginController.swift */; };
 		23BBAF0215F3751EC4AAD19E /* PasskeyAuthenticator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C29904E9FE025E2D1F22E12 /* PasskeyAuthenticator.swift */; };
 		1239E3EF7CE49B9F5D5C757C /* WidgetService.swift in Sources */ = {isa = PBXBuildFile; fileRef = DDA1934688E4D109E194DB96 /* WidgetService.swift */; };
@@ -15,14 +16,15 @@
 		26EA21BAF0EB0F9D663FE97F /* MoviePilotWidgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6E9D58111CB3F6D0CC5F8EB /* MoviePilotWidgets.swift */; };
 		2BD57F8FAA89B6CE62520CDF /* CardMenuInteraction.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32C08F097B084258A76DECD1 /* CardMenuInteraction.swift */; };
 		4230F60B0326B26D9A25E2BC /* ShellController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1EDD6E57585F04BA1211B21F /* ShellController.swift */; };
-		524FBF5743F9A6054C5AE301 /* SidebarNavigationController.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBAC4FB3A70C1D33C8E8A971 /* SidebarNavigationController.swift */; };
 		528DDA8EB6B423A11DB733E6 /* TokenStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E0A361DAFEEE9F51B4F91B7 /* TokenStore.swift */; };
 		6DDAF5BF9FAD7A46EE8A3EC6 /* BridgeBootstrap.js in Resources */ = {isa = PBXBuildFile; fileRef = 43EEF99FFB4650801A93C48B /* BridgeBootstrap.js */; };
 		74BB072F347838874E453BDA /* MoviePilotCore in Frameworks */ = {isa = PBXBuildFile; productRef = 5EA1036A3B6223749CA83C56 /* MoviePilotCore */; };
 		80E7625B8C5C9C7023F01DBC /* WidgetController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D8F05A9B6F84C071121CB37 /* WidgetController.swift */; };
+		829A4DD2551E8536CBDC77A3 /* NativeShell.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4740C5C49A915F94450056E2 /* NativeShell.swift */; };
 		83789EE8C7B5E15DE9D339B2 /* NativeFrameworkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 492AB810F34D732AF976E01D /* NativeFrameworkTests.swift */; };
 		8464FBB90159A6B122B561E9 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16DC09F74832A0B86B73E0DB /* AppDelegate.swift */; };
 		8A3D015696B0598EAB65001E /* WebCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D565B6584319D5328EB3F39 /* WebCoordinator.swift */; };
+		8BBCC0D2A5DB29B15F554B57 /* DuoShellController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A260A99A3AD8D48EDEFF342 /* DuoShellController.swift */; };
 		A0AB51CE161F94808B6EE599 /* AccountAppearance.swift in Sources */ = {isa = PBXBuildFile; fileRef = 274895617146E30E9DDE5876 /* AccountAppearance.swift */; };
 		A16EBFCEB3ABFAB48C222791 /* MoviePilotCore in Frameworks */ = {isa = PBXBuildFile; productRef = B81DBD25D5A15964693D426E /* MoviePilotCore */; };
 		A642DFCFFE0254BB381EE957 /* MoviePilotCore in Frameworks */ = {isa = PBXBuildFile; productRef = 0A56C13BC20DA849FEC8E121 /* MoviePilotCore */; };
@@ -98,6 +100,7 @@
 		6C29904E9FE025E2D1F22E12 /* PasskeyAuthenticator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PasskeyAuthenticator.swift; sourceTree = "<group>"; };
 		1E54307B2FD9DE9B104A4C0B /* NotificationController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationController.swift; sourceTree = "<group>"; };
 		1EDD6E57585F04BA1211B21F /* ShellController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellController.swift; sourceTree = "<group>"; };
+		250216E31570696233F3F41B /* DeviceShellFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceShellFactory.swift; sourceTree = "<group>"; };
 		274895617146E30E9DDE5876 /* AccountAppearance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountAppearance.swift; sourceTree = "<group>"; };
 		2A663A5F20E9060A67A02499 /* APNs.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = APNs.entitlements; sourceTree = "<group>"; };
 		2ED77660949143CE0F66ABB7 /* AuthenticationClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthenticationClient.swift; sourceTree = "<group>"; };
@@ -106,6 +109,7 @@
 		3C5522D23DCCE1A49988D78B /* NotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationService.swift; sourceTree = "<group>"; };
 		43EEF99FFB4650801A93C48B /* BridgeBootstrap.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = BridgeBootstrap.js; sourceTree = "<group>"; };
 		45F7C55CF76C93C422A267E7 /* MoviePilotUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = MoviePilotUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		4740C5C49A915F94450056E2 /* NativeShell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeShell.swift; sourceTree = "<group>"; };
 		492AB810F34D732AF976E01D /* NativeFrameworkTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeFrameworkTests.swift; sourceTree = "<group>"; };
 		5459CACEBD27D42F6FD137E0 /* MoviePilot.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = MoviePilot.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		571C52ACC53E9ADFF2774ACA /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
@@ -113,6 +117,7 @@
 		5F9B30B754752545394EF900 /* Widgets.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Widgets.entitlements; sourceTree = "<group>"; };
 		623C822C175E4F82C08A8233 /* ServiceStartupTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServiceStartupTests.swift; sourceTree = "<group>"; };
 		679A44F3DC9A280BB5F36D51 /* SearchPageController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchPageController.swift; sourceTree = "<group>"; };
+		6A260A99A3AD8D48EDEFF342 /* DuoShellController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuoShellController.swift; sourceTree = "<group>"; };
 		6D565B6584319D5328EB3F39 /* WebCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebCoordinator.swift; sourceTree = "<group>"; };
 		698AF8A62DF5A4E54A4150F9 /* MoviePilot-App */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "MoviePilot-App"; path = ..; sourceTree = SOURCE_ROOT; };
 		7E0A361DAFEEE9F51B4F91B7 /* TokenStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenStore.swift; sourceTree = "<group>"; };
@@ -123,7 +128,6 @@
 		A18E5B7A511689BF6BE63B93 /* StandaloneMenuBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StandaloneMenuBridge.swift; sourceTree = "<group>"; };
 		A6E9D58111CB3F6D0CC5F8EB /* MoviePilotWidgets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MoviePilotWidgets.swift; sourceTree = "<group>"; };
 		BAFE1B3BEB776F9449B0F919 /* MoviePilotLayoutTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = MoviePilotLayoutTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		BBAC4FB3A70C1D33C8E8A971 /* SidebarNavigationController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarNavigationController.swift; sourceTree = "<group>"; };
 		B12A1D18E5414AD1876346C5 /* ServerProfileTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerProfileTests.swift; sourceTree = "<group>"; };
 		CA63714518565C74DC4BC92B /* Provider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Provider.swift; sourceTree = "<group>"; };
 		CCC001A55D766FA81E7EC654 /* Views.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views.swift; sourceTree = "<group>"; };
@@ -177,10 +181,12 @@
 				D64A494ED8149ABF1DECA7A0 /* CardMenuBridge.swift */,
 				32C08F097B084258A76DECD1 /* CardMenuInteraction.swift */,
 				E27A900F0778C506F3B44F3E /* ConnectionController.swift */,
+				250216E31570696233F3F41B /* DeviceShellFactory.swift */,
 				11C1FABE88ED006EC70944CD /* InstanceStore.swift */,
 				8072C0F89DB70887DB4A4AEC /* LoginController.swift */,
 				E07A2D5374C03798153CFA82 /* MoreMenuController.swift */,
 				97C577DD42CBEF2372229CE0 /* NativePanelController.swift */,
+				4740C5C49A915F94450056E2 /* NativeShell.swift */,
 				2F09ECDFCEB53CD2E95A1404 /* NativeWebSheetController.swift */,
 				E3BEFC3136EEA7192AD5C20D /* NavigationSymbols.swift */,
 				1E54307B2FD9DE9B104A4C0B /* NotificationController.swift */,
@@ -190,7 +196,6 @@
 				EDC7F876AC1F304D50E70B03 /* SceneDelegate.swift */,
 				679A44F3DC9A280BB5F36D51 /* SearchPageController.swift */,
 				1EDD6E57585F04BA1211B21F /* ShellController.swift */,
-				BBAC4FB3A70C1D33C8E8A971 /* SidebarNavigationController.swift */,
 				A18E5B7A511689BF6BE63B93 /* StandaloneMenuBridge.swift */,
 				EF1A8D67F8876B6AECE70ECA /* StartupView.swift */,
 				7E0A361DAFEEE9F51B4F91B7 /* TokenStore.swift */,
@@ -198,6 +203,7 @@
 				6D565B6584319D5328EB3F39 /* WebCoordinator.swift */,
 				5D8F05A9B6F84C071121CB37 /* WidgetController.swift */,
 				DDA1934688E4D109E194DB96 /* WidgetService.swift */,
+				3B4AAAC1B26B7E60949CE782 /* Duo */,
 				AB5632D541AFC95441910E75 /* Resources */,
 			);
 			path = MoviePilot;
@@ -211,6 +217,14 @@
 				623C822C175E4F82C08A8233 /* ServiceStartupTests.swift */,
 			);
 			path = MoviePilotUITests;
+			sourceTree = "<group>";
+		};
+		3B4AAAC1B26B7E60949CE782 /* Duo */ = {
+			isa = PBXGroup;
+			children = (
+				6A260A99A3AD8D48EDEFF342 /* DuoShellController.swift */,
+			);
+			path = Duo;
 			sourceTree = "<group>";
 		};
 		4DDF86623FD6E2935988CCB0 = {
@@ -454,10 +468,13 @@
 				F3E60D44BADCE6B6319247DB /* CardMenuBridge.swift in Sources */,
 				2BD57F8FAA89B6CE62520CDF /* CardMenuInteraction.swift in Sources */,
 				AF1B137366BEA44FD5055EF3 /* ConnectionController.swift in Sources */,
+				00C595992CFDFB69E6ECDEB0 /* DeviceShellFactory.swift in Sources */,
+				8BBCC0D2A5DB29B15F554B57 /* DuoShellController.swift in Sources */,
 				B751481BFB0F29D5319D82A4 /* InstanceStore.swift in Sources */,
 				0B79AFE6E3E507A780FAEDAB /* LoginController.swift in Sources */,
 				B95E25B659010EF18733CB13 /* MoreMenuController.swift in Sources */,
 				F9CFC187B7A882F2EE4BBA4E /* NativePanelController.swift in Sources */,
+				829A4DD2551E8536CBDC77A3 /* NativeShell.swift in Sources */,
 				B6CBAC2E829D1B24417062D3 /* NativeWebSheetController.swift in Sources */,
 				B54AB8C8D2E2ADEB1BB60A6B /* NavigationSymbols.swift in Sources */,
 				EB24867710544E7DFEBDA90C /* NotificationController.swift in Sources */,
@@ -467,7 +484,6 @@
 				D25729D75787FFE684BCE836 /* SceneDelegate.swift in Sources */,
 				EBC0DFA944EF2796F87B7B76 /* SearchPageController.swift in Sources */,
 				4230F60B0326B26D9A25E2BC /* ShellController.swift in Sources */,
-				524FBF5743F9A6054C5AE301 /* SidebarNavigationController.swift in Sources */,
 				EB4FBB378F5FB78066EDB77D /* StandaloneMenuBridge.swift in Sources */,
 				E2CC1E5D7BA47467F0727E6B /* StartupView.swift in Sources */,
 				528DDA8EB6B423A11DB733E6 /* TokenStore.swift in Sources */,

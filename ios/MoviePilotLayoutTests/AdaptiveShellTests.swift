@@ -6,10 +6,11 @@ import XCTest
 @testable import MoviePilot
 
 /// Exercises the production shell with synthetic snapshots and a local HTML document, without login.
+@available(iOS 18.4, *)
 @MainActor
 final class AdaptiveShellTests: XCTestCase {
   private var window: UIWindow!
-  private var shell: ShellController!
+  private var shell: DuoShellController!
   private var coordinator: WebCoordinator!
 
   override func setUp() async throws {
@@ -22,7 +23,7 @@ final class AdaptiveShellTests: XCTestCase {
       instance: instance,
       authentication: AuthenticationResult(session: session, cookies: []),
       onAuthenticationRequired: {})
-    shell = ShellController(coordinator: coordinator, onConnection: {})
+    shell = DuoShellController(coordinator: coordinator, onConnection: {})
     coordinator.shell = shell
     let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
     window = UIWindow(windowScene: scene)
@@ -91,128 +92,114 @@ final class AdaptiveShellTests: XCTestCase {
     add(attachment)
   }
 
-  func testFoldRoundTripPreservesDocumentAndNavigation() async throws {
+  private func tabs() throws -> UITabBarController {
+    try XCTUnwrap(shell.children.compactMap { $0 as? UITabBarController }.first)
+  }
+
+  func testSystemTabsOwnNavigationWithoutCustomRails() throws {
+    resize(width: 466, height: 678, regular: false)
+    shell.apply(try snapshot())
+    shell.view.layoutIfNeeded()
+    let tabs = try tabs()
+    XCTAssertEqual(tabs.tabs.map(\.title).prefix(4), ["仪表盘", "推荐", "探索", "更多"])
+    XCTAssertTrue(tabs.tabs.last is UISearchTab)
+    XCTAssertEqual(tabs.selectedTab?.identifier, "recommend")
+    XCTAssertFalse(tabs.isTabBarHidden)
+    XCTAssertTrue(coordinator.content.parent?.navigationController?.parent === tabs)
+    XCTAssertEqual(coordinator.content.parent?.additionalSafeAreaInsets, .zero)
+    XCTAssertTrue(
+      shell.children.allSatisfy { $0 is UITabBarController || $0 is UINavigationController })
+    capture("system-tabs-compact")
+  }
+
+  func testFoldAndSplitResizePreserveDocument() async throws {
     resize(width: 1100, height: 900, regular: true)
     shell.apply(try snapshot())
     shell.setLoading(false)
     shell.view.layoutIfNeeded()
-    let webView = coordinator.webView
-    // The production delegate intentionally rejects about:blank; this fixture has no server.
-    webView.navigationDelegate = nil
-    webView.loadHTMLString(
-      "<meta name='viewport' content='width=device-width'><input id='query' value='保留搜索'><div style='height:3000px'>布局测试</div>",
-      baseURL: nil)
+    let web = coordinator.webView
+    web.navigationDelegate = nil
+    web.loadHTMLString("<input id='query' value='保留搜索'>", baseURL: nil)
     for _ in 0..<100 {
-      if (try? await webView.evaluateJavaScript("document.getElementById('query') !== null"))
-        as? Bool == true
+      if (try? await web.evaluateJavaScript("document.getElementById('query') !== null")) as? Bool
+        == true
       {
         break
       }
       try await Task.sleep(for: .milliseconds(50))
     }
-    _ = try await webView.evaluateJavaScript(
-      "window.fixtureIdentity='same-document'; window.scrollTo(0,200)")
     let parent = coordinator.content.parent
-    XCTAssertFalse(try find("native-sidebar-navigation").isHidden)
-    XCTAssertTrue(try find("native-bottom-navigation").isHidden)
-    XCTAssertNotNil(
-      (parent as? ContentHostController)?.navigationItem.titleView as? UISegmentedControl)
-    XCTAssertEqual(parent?.additionalSafeAreaInsets.bottom, 0)
-    capture("expanded-navigation")
-
-    for _ in 0..<3 {
-      resize(width: 390, height: 844, regular: false)
-      XCTAssertTrue(try find("native-sidebar-navigation").isHidden)
-      XCTAssertFalse(try find("native-bottom-navigation").isHidden)
-      XCTAssertGreaterThan(parent?.additionalSafeAreaInsets.bottom ?? 0, 0)
+    let tabs = try tabs()
+    for width in [466.0, 430, 1100, 500, 390, 1100] {
+      resize(width: width, height: 678, regular: width > 600)
+      XCTAssertTrue(coordinator.webView === web)
       XCTAssertTrue(coordinator.content.parent === parent)
-      XCTAssertTrue(coordinator.webView === webView)
-      let query =
-        try await webView.evaluateJavaScript("document.getElementById('query').value") as? String
-      XCTAssertEqual(query, "保留搜索")
-      resize(width: 1100, height: 900, regular: true)
-      XCTAssertFalse(try find("native-sidebar-navigation").isHidden)
-      XCTAssertTrue(try find("native-bottom-navigation").isHidden)
-      XCTAssertTrue(coordinator.content.parent === parent)
+      XCTAssertEqual(tabs.selectedTab?.identifier, "recommend")
+      XCTAssertEqual(parent?.additionalSafeAreaInsets, .zero)
+      let value =
+        try await web.evaluateJavaScript("document.getElementById('query').value") as? String
+      XCTAssertEqual(value, "保留搜索")
     }
-    let identity = try await webView.evaluateJavaScript("window.fixtureIdentity") as? String
-    XCTAssertEqual(identity, "same-document")
-    resize(width: 390, height: 844, regular: false)
-    capture("compact-navigation")
+    capture("system-tabs-expanded")
   }
 
-  func testPhoneLandscapeAndFullscreenDoNotReserveSidebar() throws {
-    resize(width: 852, height: 393, regular: true, tall: false)
+  func testUnconfirmedSelectionAndOverlayRemainGuarded() throws {
+    resize(width: 466, height: 678, regular: false)
     shell.apply(try snapshot())
-    shell.view.layoutIfNeeded()
-    XCTAssertTrue(try find("native-sidebar-navigation").isHidden)
-    XCTAssertFalse(try find("native-bottom-navigation").isHidden)
-    resize(width: 1100, height: 900, regular: true)
+    let tabs = try tabs()
+    XCTAssertFalse(shell.tabBarController(tabs, shouldSelectTab: tabs.tabs[0]))
+    XCTAssertEqual(tabs.selectedTab?.identifier, "recommend")
+    shell.apply(try snapshot(overlay: true))
+    XCTAssertTrue(tabs.tabs.allSatisfy { !$0.isEnabled })
+    XCTAssertFalse(shell.tabBarController(tabs, shouldSelectTab: tabs.tabs[0]))
+    shell.apply(try snapshot())
+    XCTAssertTrue(tabs.tabs[0].isEnabled)
     shell.apply(try snapshot(overlay: true, fullscreen: true))
-    shell.view.layoutIfNeeded()
-    XCTAssertTrue(try find("native-sidebar-navigation").isHidden)
-    XCTAssertTrue(try find("native-bottom-navigation").isHidden)
-    XCTAssertEqual(coordinator.content.parent?.additionalSafeAreaInsets.bottom, 0)
+    XCTAssertTrue(tabs.isTabBarHidden)
+    XCTAssertEqual(coordinator.content.parent?.additionalSafeAreaInsets, .zero)
   }
 
-  func testSidebarOverlayAndLargeText() throws {
-    resize(width: 1100, height: 900, regular: true)
-    shell.apply(try snapshot(overlay: true))
+  func testConfirmedRootSwitchKeepsSingleWebViewAndSystemHierarchy() throws {
+    resize(width: 466, height: 678, regular: false)
+    let original = try snapshot()
+    shell.apply(original)
+    let web = coordinator.webView
+    var json = try XCTUnwrap(
+      JSONSerialization.jsonObject(with: JSONEncoder().encode(original)) as? [String: Any])
+    json["route"] = [
+      "fullPath": "/dashboard", "rootId": "dashboard", "title": "仪表盘", "canGoBack": false,
+    ]
+    let next = try JSONDecoder().decode(
+      NavigationSnapshot.self, from: JSONSerialization.data(withJSONObject: json))
+    shell.apply(next)
     shell.view.layoutIfNeeded()
-    let sidebar = try find("native-sidebar-navigation")
-    XCTAssertTrue(sidebar.accessibilityElementsHidden)
-    XCTAssertFalse(try find("native-sidebar-list").isUserInteractionEnabled)
-    shell.apply(try snapshot())
-    shell.traitOverrides.preferredContentSizeCategory = .accessibilityExtraExtraExtraLarge
-    shell.view.layoutIfNeeded()
-    XCTAssertEqual(sidebar.bounds.width, 280, accuracy: 1)
-    XCTAssertFalse(sidebar.accessibilityElementsHidden)
-    XCTAssertNil(
-      (coordinator.content.parent as? ContentHostController)?.navigationItem.titleView
-        as? UISegmentedControl)
-    capture("expanded-large-text")
+    XCTAssertEqual(try tabs().selectedTab?.identifier, "dashboard")
+    XCTAssertTrue(coordinator.webView === web)
+    XCTAssertTrue(coordinator.content.parent?.navigationController?.parent === (try tabs()))
   }
 
-  func testSidebarKeepsConfirmedSelectionUntilRouteAcknowledgement() throws {
-    resize(width: 1100, height: 900, regular: true)
-    shell.apply(try snapshot())
-    shell.view.layoutIfNeeded()
-    let sidebar = try XCTUnwrap(
-      shell.children.compactMap { $0 as? SidebarNavigationController }.first)
-    let list = try XCTUnwrap(find("native-sidebar-list") as? UICollectionView)
-    var requested: String?
-    sidebar.onSelectRoot = { requested = $0 }
-    sidebar.collectionView(list, didSelectItemAt: IndexPath(item: 0, section: 0))
-    XCTAssertEqual(requested, "dashboard")
-    XCTAssertEqual(list.indexPathsForSelectedItems, [IndexPath(item: 1, section: 0)])
-    shell.apply(try snapshot(overlay: true))
-    requested = nil
-    sidebar.collectionView(list, didSelectItemAt: IndexPath(item: 0, section: 0))
-    XCTAssertNil(requested)
-    shell.apply(try snapshot())
-    sidebar.collectionView(list, didSelectItemAt: IndexPath(item: 0, section: 0))
-    XCTAssertEqual(requested, "dashboard")
-  }
-
-  func testMediumExpandedPortraitUsesNarrowerSidebar() throws {
-    resize(width: 669, height: 951, regular: true)
-    shell.apply(try snapshot())
-    shell.view.layoutIfNeeded()
-    let sidebar = try find("native-sidebar-navigation")
-    XCTAssertFalse(sidebar.isHidden)
-    XCTAssertLessThanOrEqual(sidebar.bounds.width, 240)
-    XCTAssertGreaterThanOrEqual(coordinator.content.view.bounds.width, 440)
-    capture("expanded-portrait")
-  }
-
-  func testRightToLeftSidebarReservesTrailingSpace() throws {
-    resize(width: 1100, height: 900, regular: true)
-    shell.view.semanticContentAttribute = .forceRightToLeft
-    shell.traitOverrides.layoutDirection = .rightToLeft
-    shell.apply(try snapshot())
-    shell.view.layoutIfNeeded()
-    let sidebar = try find("native-sidebar-navigation")
-    let content = coordinator.content.view.convert(coordinator.content.view.bounds, to: shell.view)
-    XCTAssertGreaterThanOrEqual(sidebar.frame.minX, content.maxX - 1)
+  func testDeviceFactorySelectsIsolatedImplementations() throws {
+    let duo = DeviceShellFactory.make(
+      coordinator: coordinator, onConnection: {}, modelIdentifier: "iPhone19,4")
+    XCTAssertTrue(duo is DuoShellController)
+    for model in ["iPhone19,1", "iPhone19,2", "iPhone19,3", "iPad17,2", "unknown"] {
+      let original = DeviceShellFactory.make(
+        coordinator: coordinator, onConnection: {}, modelIdentifier: model)
+      XCTAssertTrue(original is ShellController, model)
+      XCTAssertFalse(original is DuoShellController, model)
+      original.loadViewIfNeeded()
+      original.traitOverrides.horizontalSizeClass = .regular
+      original.traitOverrides.verticalSizeClass = .regular
+      original.view.frame = CGRect(x: 0, y: 0, width: 1100, height: 900)
+      original.apply(try snapshot())
+      original.setLoading(false)
+      original.view.layoutIfNeeded()
+      func descendants(_ view: UIView) -> [UIView] { [view] + view.subviews.flatMap(descendants) }
+      let views = descendants(original.view)
+      XCTAssertFalse(views.contains { $0.accessibilityIdentifier == "duo-system-tabs" }, model)
+      let bottom = try XCTUnwrap(
+        views.first { $0.accessibilityIdentifier == "native-bottom-navigation" })
+      XCTAssertFalse(bottom.isHidden, model)
+    }
   }
 }

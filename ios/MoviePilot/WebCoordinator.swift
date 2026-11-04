@@ -22,7 +22,7 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
   let instance: SavedInstance
   let webView: WKWebView
   let content: WebContentController
-  weak var shell: ShellController?
+  weak var shell: (any NativeShell)?
   var onNavigationReady: (() -> Void)?
   private let relay: ScriptRelay
   private var session = ChromeSession()
