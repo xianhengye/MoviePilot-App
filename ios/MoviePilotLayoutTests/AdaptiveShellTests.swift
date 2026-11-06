@@ -178,6 +178,90 @@ final class AdaptiveShellTests: XCTestCase {
     XCTAssertTrue(coordinator.content.parent?.navigationController?.parent === (try tabs()))
   }
 
+  private func searchSnapshot(enabled: Bool = true, loading: Bool = false, overlay: Bool = false)
+    throws -> NavigationSnapshot
+  {
+    var json = try XCTUnwrap(
+      JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot(overlay: overlay)))
+        as? [String: Any])
+    json["actions"] = [
+      [
+        "actionId": "r1:global:search", "ownerId": "search-owner", "title": "搜索",
+        "icon": "mdi-magnify", "position": "trailing", "enabled": enabled, "loading": loading,
+        "panel": ["title": "搜索回归测试", "sections": []],
+      ]
+    ]
+    return try JSONDecoder().decode(
+      NavigationSnapshot.self, from: JSONSerialization.data(withJSONObject: json))
+  }
+
+  func testSearchTabOpensSearchInsteadOfSelectingEmptyController() throws {
+    resize(width: 466, height: 678, regular: false)
+    shell.apply(try searchSnapshot())
+    shell.view.layoutIfNeeded()
+    let tabs = try tabs()
+    let search = try XCTUnwrap(tabs.tabs.last as? UISearchTab)
+    XCTAssertTrue(search.isEnabled)
+    XCTAssertFalse(shell.tabBarController(tabs, shouldSelectTab: search))
+    let panel = try XCTUnwrap(
+      shell.presentedViewController as? UINavigationController,
+      "Tapping the search tab must actually dispatch the search action")
+    XCTAssertTrue(panel.topViewController is NativePanelController)
+    XCTAssertEqual(tabs.selectedTab?.identifier, "recommend")
+  }
+
+  func testConfirmedSearchUsesVisibleSearchTabHostAndReturnsToRoot() throws {
+    resize(width: 466, height: 678, regular: false)
+    let root = try searchSnapshot()
+    shell.apply(root)
+    let rootHost = coordinator.content.parent
+    let web = coordinator.webView
+    let tabs = try tabs()
+    var json = try XCTUnwrap(
+      JSONSerialization.jsonObject(with: JSONEncoder().encode(root)) as? [String: Any])
+    json["route"] = [
+      "fullPath": "/search", "title": "搜索", "canGoBack": true, "backTarget": "/recommend",
+    ]
+    json["chrome"] = [
+      "topVisible": true, "bottomVisible": true, "theme": "system", "content": "search",
+    ]
+    let searchState = try JSONDecoder().decode(
+      NavigationSnapshot.self, from: JSONSerialization.data(withJSONObject: json))
+    shell.apply(searchState)
+    shell.view.layoutIfNeeded()
+    XCTAssertTrue(tabs.selectedTab is UISearchTab, "Confirmed search must display the search tab")
+    XCTAssertTrue(
+      coordinator.content.parent?.navigationController === tabs.selectedViewController,
+      "The single WebView and native search page must belong to the visible navigation controller")
+    XCTAssertTrue(
+      coordinator.content.parent?.children.contains { $0 is SearchPageController } == true)
+    for width in [430.0, 1000, 466] {
+      resize(width: width, height: 678, regular: width > 600)
+      XCTAssertTrue(
+        coordinator.content.parent?.navigationController === tabs.selectedViewController)
+    }
+    shell.apply(root)
+    shell.view.layoutIfNeeded()
+    XCTAssertEqual(tabs.selectedTab?.identifier, "recommend")
+    XCTAssertTrue(coordinator.content.parent === rootHost)
+    XCTAssertTrue(coordinator.webView === web)
+  }
+
+  func testSearchTabRespectsDisabledLoadingAndOverlayStates() throws {
+    resize(width: 466, height: 678, regular: false)
+    for state in [
+      try searchSnapshot(enabled: false), try searchSnapshot(loading: true),
+      try searchSnapshot(overlay: true),
+    ] {
+      shell.apply(state)
+      let tabs = try tabs()
+      let search = try XCTUnwrap(tabs.tabs.last as? UISearchTab)
+      XCTAssertFalse(search.isEnabled)
+      XCTAssertFalse(shell.tabBarController(tabs, shouldSelectTab: search))
+      XCTAssertNil(shell.presentedViewController)
+    }
+  }
+
   func testDeviceFactorySelectsIsolatedImplementations() throws {
     let duo = DeviceShellFactory.make(
       coordinator: coordinator, onConnection: {}, modelIdentifier: "iPhone19,4")

@@ -131,7 +131,8 @@ final class DuoShellController: UIViewController, UIPopoverPresentationControlle
   private let moreMenu = MoreMenuController()
   private var searchPage: SearchPageController?
   private let systemTabs = UITabBarController()
-  private let searchNavigation = UINavigationController(rootViewController: UIViewController())
+  private let searchHost = ContentHostController(rootId: nil)
+  private lazy var searchNavigation = UINavigationController(rootViewController: searchHost)
   private var panelNavigation: UINavigationController?
   private var panelImages: NativePanelImageLoader?
   private var panelAction: ActionSnapshot?
@@ -590,6 +591,7 @@ final class DuoShellController: UIViewController, UIPopoverPresentationControlle
   /// 独立入口不占用业务栏目宿主；未就绪时也由共享容器暂存正文。
   private var selectedHost: ContentHostController {
     guard latest?.chrome.bottomVisible == true else { return compatibilityHost }
+    if latest?.chrome.content == .search { return searchHost }
     if latest?.route.rootId == nil { return compatibilityHost }
     if let id = latest?.route.rootId, let host = hosts.first(where: { $0.rootId == id }) {
       return host
@@ -599,7 +601,10 @@ final class DuoShellController: UIViewController, UIPopoverPresentationControlle
 
   /// 没有业务底栏的页面使用单导航容器，避免伪造空白 Tab。
   private var nativeContainer: UIViewController? {
-    latest?.chrome.bottomVisible == true && !rootNavigations.isEmpty
+    guard latest?.chrome.bottomVisible == true, !rootNavigations.isEmpty else {
+      return compatibilityNavigation
+    }
+    return latest?.chrome.content == .search || latest?.route.rootId != nil
       ? systemTabs : compatibilityNavigation
   }
 
@@ -645,9 +650,13 @@ final class DuoShellController: UIViewController, UIPopoverPresentationControlle
       if #available(iOS 18.4, *) {
         systemTabs.tabs.last?.isEnabled =
           enabled
-          && snapshot.actions.contains { $0.actionId.hasSuffix(":global:search") && $0.enabled }
+          && snapshot.actions.contains {
+            $0.actionId.hasSuffix(":global:search") && $0.enabled && !$0.loading
+          }
       }
-      if let id = snapshot.route.rootId,
+      if snapshot.chrome.content == .search {
+        systemTabs.selectedTab = systemTabs.tabs.first { $0 is UISearchTab }
+      } else if let id = snapshot.route.rootId,
         let selected = systemTabs.tabs.first(where: { $0.identifier == id })
       {
         systemTabs.selectedTab = selected
@@ -660,7 +669,7 @@ final class DuoShellController: UIViewController, UIPopoverPresentationControlle
   {
     guard let snapshot = latest, snapshot.presentation?.overlayOpen != true else { return false }
     if tab is UISearchTab {
-      searchButton(snapshot).sendActions(for: .primaryActionTriggered)
+      openSearch()
     } else if snapshot.roots.contains(where: { $0.id == tab.identifier }) {
       if snapshot.roots.first(where: { $0.id == tab.identifier })?.path == "/apps" {
         moreMenu.scrollToBeginning()
@@ -1691,34 +1700,18 @@ final class DuoShellController: UIViewController, UIPopoverPresentationControlle
     if resetState { searchPage = nil }
   }
 
-  /// 无页内动作时始终提供同尺寸搜索按钮，入口仍复用当前授权的网页全局动作。
-  private func searchButton(_ snapshot: NavigationSnapshot) -> UIButton {
-    var config = UIButton.Configuration.tinted()
-    if #available(iOS 26.0, *) { config = .glass() }
-    config.cornerStyle = .capsule
-    config.image = UIImage(
-      systemName: "magnifyingglass", withConfiguration: NavigationSymbols.bottomConfiguration)
-    if snapshot.chrome.content == .search {
-      config.baseForegroundColor =
-        NavigationSymbols.color(snapshot.chrome.accentColor) ?? AccountAppearance.accent
+  /// Dispatch directly from the current confirmed snapshot, without synthesizing a detached button.
+  private func openSearch() {
+    guard nativeVisible, let snapshot = latest,
+      snapshot.presentation?.overlayOpen != true, snapshot.chrome.content != .search,
+      let action = snapshot.actions.first(where: { $0.actionId.hasSuffix(":global:search") }),
+      action.enabled, !action.loading
+    else { return }
+    if action.dataAttr == "native-search-page" || action.panel == nil {
+      coordinator.invoke(action)
+    } else {
+      openNativePanel(action)
     }
-    let action = snapshot.actions.first { $0.actionId.hasSuffix(":global:search") }
-    let button = UIButton(
-      configuration: config,
-      primaryAction: UIAction { [weak self] _ in
-        guard let self, let action else { return }
-        if self.latest?.chrome.content == .search { return }
-        if action.dataAttr == "native-search-page" {
-          self.coordinator.invoke(action)
-        } else if action.panel != nil {
-          self.openNativePanel(action)
-        } else {
-          self.coordinator.invoke(action)
-        }
-      })
-    button.accessibilityLabel = "搜索"
-    button.isEnabled = action?.enabled == true && snapshot.presentation?.overlayOpen != true
-    return button
   }
 
   /// 原生目录叠在实时网页背景上；Sheet 搬走 WebView 时由底页快照保持相同壁纸。
