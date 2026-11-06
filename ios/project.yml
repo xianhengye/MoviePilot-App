@@ -39,6 +39,7 @@ targets:
       gatherCoverageData: true
       testTargets:
         - MoviePilotUITests
+        - MoviePilotLayoutTests
   MoviePilotWidgets:
     type: app-extension
     platform: iOS
@@ -66,4 +67,16 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: org.moviepilot.app.uitests
+        GENERATE_INFOPLIST_FILE: true
+  MoviePilotLayoutTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: MoviePilotLayoutTests
+    dependencies:
+      - target: MoviePilot
+      - package: MoviePilotCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.moviepilot.app.layouttests
         GENERATE_INFOPLIST_FILE: true

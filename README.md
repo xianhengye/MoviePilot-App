@@ -1,5 +1,7 @@
 # MoviePilot-App
 
+本 fork 为 iPhone Duo 提供独立的系统导航容器，让 UIKit 处理折叠及分屏时的侧边工具栏和标签栏；iPhone 18 等其他机型继续运行原版导航代码。见[自适应导航与验证](guides/adaptive-navigation.md)。
+
 MoviePilot 的 iOS 客户端。使用系统原生导航、搜索和快捷面板，业务页面、弹窗内容和插件界面继续复用 MoviePilot-Frontend。
 
 iOS 26+ 支持系统 Liquid Glass；提供侧滑返回、卡片长按菜单、原生弹窗及前后台恢复。[查看界面截图](screenshots/README.md)。
