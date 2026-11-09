@@ -6,6 +6,7 @@ import WebKit
 @MainActor
 final class ConnectionController: UITableViewController, UITextFieldDelegate {
   private let instances: InstanceStore
+  private let connectionError: String?
   private let onConnect: (SavedInstance) -> Void
   private let addressField = UITextField()
   private var savedInstances: [SavedInstance] = []
@@ -14,8 +15,12 @@ final class ConnectionController: UITableViewController, UITextFieldDelegate {
   private var addressSection: Int { savedInstances.isEmpty ? 0 : 1 }
 
   /// 接收实例存储与连接结果，不把账号数据引入原生配置。
-  init(instances: InstanceStore, onConnect: @escaping (SavedInstance) -> Void) {
+  init(
+    instances: InstanceStore, connectionError: String? = nil,
+    onConnect: @escaping (SavedInstance) -> Void
+  ) {
     self.instances = instances
+    self.connectionError = connectionError
     self.onConnect = onConnect
     super.init(style: .insetGrouped)
   }
@@ -54,6 +59,7 @@ final class ConnectionController: UITableViewController, UITextFieldDelegate {
       addressField.text = previous.address.url.absoluteString
       _ = showCompatibilityError(previous.address)
     }
+    if let connectionError { showError(connectionError) }
   }
 
   /// 尚无历史时仅展示添加服务，已有记录时在上方增加服务分组。
@@ -264,16 +270,18 @@ final class ConnectionController: UITableViewController, UITextFieldDelegate {
     present(alert, animated: true)
   }
 
-  /// 清空独立数据仓后移除凭据与配置；实例清理接口也支持尚未创建 WebView 的冷启动。
+  /// 清空持久网页仓后移除凭据；iOS 16 内存仓随会话释放，不触碰其他服务的数据。
   private func forget(_ instance: SavedInstance) {
     view.isUserInteractionEnabled = false
     Task { [weak self] in
       guard let self else { return }
       defer { self.view.isUserInteractionEnabled = true }
       do {
-        let store = WKWebsiteDataStore(forIdentifier: instance.id)
-        await store.removeData(
-          ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
+        if #available(iOS 17.0, *) {
+          let store = WKWebsiteDataStore(forIdentifier: instance.id)
+          await store.removeData(
+            ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
+        }
         try self.instances.forget(instance)
         if (try? ServerAddress(self.addressField.text ?? "")) == instance.address {
           self.addressField.text = nil

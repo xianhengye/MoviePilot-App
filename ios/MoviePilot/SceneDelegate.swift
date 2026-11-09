@@ -117,14 +117,15 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
   func sceneDidEnterBackground(_ scene: UIScene) { coordinator?.setLifecycle("background") }
 
   /// 断开旧会话后显示实例配置，旧脚本 handler 不得继续接收命令。
-  private func showConnection() {
+  private func showConnection(message: String? = nil) {
     if instances.selected != nil { homeShortcut.clear() }
     widgetLinkTask?.cancel()
     widgetLinkTask = nil
     WidgetService.shared.cancelOpen()
     coordinator?.stop()
     coordinator = nil
-    let controller = ConnectionController(instances: instances) { [weak self] instance in
+    let controller = ConnectionController(instances: instances, connectionError: message) {
+      [weak self] instance in
       // 清除旧版本的网页偏好，重新连接始终走原生认证。
       UserDefaults.standard.removeObject(forKey: "moviepilot.web-login.\(instance.id)")
       self?.connect(instance)
@@ -175,22 +176,24 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
           self.window?.rootViewController?.present(alert, animated: true)
         }
       },
-      onConnection: { [weak self] in self?.showConnection() })
+      onConnection: { [weak self] message in self?.showConnection(message: message) })
     window?.rootViewController = AccountAppearance.navigationController(
       root: login, instance: instance.id)
   }
 
-  /// 业务网页只在原生认证后创建；运行中失效通知始终撤销令牌并回到原生登录。
+  /// 原生认证后先收起登录键盘再交接网页；会话失效始终撤销令牌并回到原生登录。
   private func openWeb(
     _ instance: SavedInstance, authentication: AuthenticationResult
   ) {
+    window?.endEditing(true)
     coordinator?.stop()
     let coordinator = WebCoordinator(
       instance: instance, authentication: authentication,
       onAuthenticationRequired: { [weak self] in
         self?.tokens.remove(instance.id)
         self?.showLogin(instance)
-      })
+      },
+      onConnectionFailed: { [weak self] message in self?.showConnection(message: message) })
     let shell = DeviceShellFactory.make(
       coordinator: coordinator,
       onConnection: { [weak self] in self?.showConnection() })

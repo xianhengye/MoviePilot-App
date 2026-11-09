@@ -4,11 +4,11 @@ from pathlib import Path
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-# Upstream jxxghp/MoviePilot-App aee8fc31ef29ad36a5833529df1f71b95fe8e41f.
+# Upstream jxxghp/MoviePilot-App 49a0b049f74bd0f480de243e22623f23317af8b0.
 # Update these only when intentionally upgrading the original UI from upstream.
 UPSTREAM_HASHES = {
-    "ShellController.swift": "4d9e9475c2c875fc987ec94a38d60926ee06112dcd7f906c4a7bbe2c2b81abb6",
-    "BottomNavigationView.swift": "ef33236631f62368e4b2e837a677b03ee5422b425912bbbdd7e1506ff127b247",
+    "ShellController.swift": "2b043ddeb32b40bb8b2d3d6c120bb1427c5b6ff60a3ecd0d2dfa27c3c9fdabed",
+    "BottomNavigationView.swift": "5ff1aeefea4fcfa4f2940b502235a153d4186a5ca9a21e28b1e8fb40c03d5410",
 }
 
 

@@ -2,7 +2,7 @@
 
 ## 两套界面实现
 
-- `ios/MoviePilot/ShellController.swift` 与 `BottomNavigationView.swift` 保留上游 `aee8fc31ef29ad36a5833529df1f71b95fe8e41f` 的原始内容。Python 回归校验 SHA-256，防止 Duo 调整意外改动原版导航。
+- `ios/MoviePilot/ShellController.swift` 与 `BottomNavigationView.swift` 保留上游 `49a0b049f74bd0f480de243e22623f23317af8b0` 的原始内容。Python 回归校验 SHA-256，防止 Duo 调整意外改动原版导航。
 - `DeviceShellFactory` 在建立认证后的界面时选择实现。只有已确认的 Duo 型号 `iPhone19,4` 使用 `Duo/DuoShellController.swift`；iPhone 18、其他直板机型、iPad 和未知型号使用原版。
 - 真机通过 `uname` 获取型号，模拟器使用系统的 `SIMULATOR_MODEL_IDENTIFIER`。不根据屏幕宽度、设备名称或系统版本猜测型号。
 - 两套界面通过 `NativeShell` 共用原有登录、WebCoordinator、单一 WebView 和业务通信。协议遵循在独立文件声明，不修改原版界面文件。

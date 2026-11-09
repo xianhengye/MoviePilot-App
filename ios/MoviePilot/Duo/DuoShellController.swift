@@ -147,6 +147,7 @@ final class DuoShellController: UIViewController, UIPopoverPresentationControlle
   private var webSheet: NativeWebSheetController?
   private var sheetNavigation: UINavigationController?
   private var sheetAttachedID: String?
+  private var sheetAttachmentIDs: [String] = []
   private var sheetDismissing = false
   private var sheetRestoreToken: UUID?
   private var preparingSheetID: String?
@@ -188,10 +189,12 @@ final class DuoShellController: UIViewController, UIPopoverPresentationControlle
   override func viewDidLoad() {
     super.viewDidLoad()
     view.backgroundColor = .systemBackground
-    registerForTraitChanges([UITraitUserInterfaceStyle.self]) {
-      (controller: DuoShellController, _: UITraitCollection) in
-      controller.synchronizeContentBackground()
-      controller.setNeedsStatusBarAppearanceUpdate()
+    if #available(iOS 17.0, *) {
+      registerForTraitChanges([UITraitUserInterfaceStyle.self]) {
+        (controller: DuoShellController, _: UITraitCollection) in
+        controller.synchronizeContentBackground()
+        controller.setNeedsStatusBarAppearanceUpdate()
+      }
     }
     systemTabs.delegate = self
     systemTabs.view.accessibilityIdentifier = "duo-system-tabs"
@@ -471,7 +474,7 @@ final class DuoShellController: UIViewController, UIPopoverPresentationControlle
     let bounds = host.view.bounds
     let safe = host.view.safeAreaInsets
     let system = view.window?.safeAreaInsets ?? .zero
-    let overlap = keyboard.map { host.view.convert($0, from: nil).intersection(bounds).height } ?? 0
+    let overlap = WebCoordinator.keyboardOcclusion(in: host.view, frame: keyboard)
     return .object([
       "layoutRevision": .number(Double(revision)),
       "viewportPoints": .object(["width": .number(bounds.width), "height": .number(bounds.height)]),
@@ -504,6 +507,8 @@ final class DuoShellController: UIViewController, UIPopoverPresentationControlle
       }
       keepStartupInFront()
     } else {
+      // 首屏可交互前清理登录或网页自动聚焦遗留的键盘，避免压缩 Duo 系统操作栏。
+      view.endEditing(true)
       startupView?.removeFromSuperview()
       startupView = nil
       activeContainer?.view.accessibilityElementsHidden = false
@@ -1246,7 +1251,7 @@ final class DuoShellController: UIViewController, UIPopoverPresentationControlle
     controller.onLayout = { [weak self] in self?.coordinator.layoutChanged() }
     let navigation = UINavigationController(rootViewController: controller)
     navigation.overrideUserInterfaceStyle = overrideUserInterfaceStyle
-    navigation.view.backgroundColor = .clear
+    navigation.view.backgroundColor = NativeModalAppearance.backgroundColor
     navigation.view.tintColor = view.tintColor
     navigation.modalPresentationStyle = .pageSheet
     webSheet = controller
@@ -1273,6 +1278,9 @@ final class DuoShellController: UIViewController, UIPopoverPresentationControlle
     _ descriptor: NativeSheetSnapshot, controller: NativeWebSheetController
   ) {
     sheetAttachedID = descriptor.id
+    // 新层可能在 attach 到达网页前关闭；保留本轮候选，归还时才能找到实际接管的上一层。
+    sheetAttachmentIDs.removeAll { $0 == descriptor.id }
+    sheetAttachmentIDs.append(descriptor.id)
     coordinator.layoutChanged()
     coordinator.command(
       "presentation.attach", payload: .object(["id": .string(descriptor.id)])
@@ -1285,6 +1293,7 @@ final class DuoShellController: UIViewController, UIPopoverPresentationControlle
         self.coordinator.recoverNavigation()
         return
       }
+      self.sheetAttachmentIDs = [descriptor.id]
       guard let navigation = self.sheetNavigation, navigation.presentingViewController == nil,
         self.presentedViewController == nil, self.nativeVisible,
         self.latest?.presentation?.sheet?.id == descriptor.id
@@ -1359,7 +1368,7 @@ final class DuoShellController: UIViewController, UIPopoverPresentationControlle
     sheetDismissing = true
     let token = UUID()
     sheetRestoreToken = token
-    let id = sheetAttachedID
+    let attachmentIDs = Array(sheetAttachmentIDs.reversed())
     let dismiss = { [weak self] in
       guard let self, self.sheetRestoreToken == token else { return }
       self.removeSheetStaging(navigation)
@@ -1381,15 +1390,31 @@ final class DuoShellController: UIViewController, UIPopoverPresentationControlle
     synchronizeContentBackground()
     host.view.layoutIfNeeded()
     coordinator.layoutChanged()
-    if let id, nativeVisible {
-      coordinator.command(
-        "presentation.detach", payload: .object(["id": .string(id)])
-      ) { [weak self] accepted in
-        guard let self, self.sheetRestoreToken == token else { return }
-        if accepted { dismiss() } else { self.coordinator.recoverNavigation() }
-      }
+    if !attachmentIDs.isEmpty, nativeVisible {
+      detachWebSheet(attachmentIDs[...], token: token, completion: dismiss)
     } else {
       dismiss()
+    }
+  }
+
+  /// 只归还本轮尝试接管过的层；明确拒绝才检查上一层，不重放保存或关闭等业务动作。
+  private func detachWebSheet(
+    _ ids: ArraySlice<String>, token: UUID, completion: @escaping () -> Void
+  ) {
+    guard sheetRestoreToken == token else { return }
+    guard let id = ids.first else {
+      coordinator.recoverNavigation()
+      return
+    }
+    coordinator.command(
+      "presentation.detach", payload: .object(["id": .string(id)])
+    ) { [weak self] accepted in
+      guard let self, self.sheetRestoreToken == token else { return }
+      if accepted {
+        completion()
+      } else {
+        self.detachWebSheet(ids.dropFirst(), token: token, completion: completion)
+      }
     }
   }
 
@@ -1400,6 +1425,7 @@ final class DuoShellController: UIViewController, UIPopoverPresentationControlle
     webSheet = nil
     sheetNavigation = nil
     sheetAttachedID = nil
+    sheetAttachmentIDs.removeAll()
     sheetExitPlaceholder?.removeFromSuperview()
     sheetExitPlaceholder = nil
     sheetPagePlaceholder?.removeFromSuperview()

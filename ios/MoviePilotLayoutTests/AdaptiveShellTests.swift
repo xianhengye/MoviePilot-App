@@ -22,7 +22,7 @@ final class AdaptiveShellTests: XCTestCase {
     coordinator = WebCoordinator(
       instance: instance,
       authentication: AuthenticationResult(session: session, cookies: []),
-      onAuthenticationRequired: {})
+      onAuthenticationRequired: {}, onConnectionFailed: { _ in })
     shell = DuoShellController(coordinator: coordinator, onConnection: {})
     coordinator.shell = shell
     let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
@@ -260,6 +260,45 @@ final class AdaptiveShellTests: XCTestCase {
       XCTAssertFalse(shell.tabBarController(tabs, shouldSelectTab: search))
       XCTAssertNil(shell.presentedViewController)
     }
+  }
+
+  func testKeyboardOcclusionUsesWindowScreenCoordinatesAfterResize() throws {
+    resize(width: 466, height: 678, regular: false)
+    shell.apply(try snapshot())
+    shell.view.layoutIfNeeded()
+    let host = try XCTUnwrap(coordinator.content.parent?.view)
+    let screen = try XCTUnwrap(host.window?.screen)
+    let covered = CGRect(x: 0, y: host.bounds.height - 120, width: host.bounds.width, height: 120)
+    let frame = host.convert(covered, to: screen.coordinateSpace)
+    XCTAssertEqual(WebCoordinator.keyboardOcclusion(in: host, frame: frame), 120, accuracy: 1)
+    let payload = shell.layoutPayload(revision: 1, keyboard: frame)
+    guard case .object(let values) = payload else { return XCTFail("Missing host layout") }
+    XCTAssertEqual(values["keyboardOcclusion"], .number(120))
+    XCTAssertEqual(WebCoordinator.keyboardOcclusion(in: host, frame: nil), 0)
+  }
+
+  func testUnreachableStartupReturnsToConnectionWithoutDroppingFailure() throws {
+    let instance = SavedInstance(id: UUID(), address: try ServerAddress("http://127.0.0.1:9"))
+    let session = try AuthenticationSession(
+      loginData: Data(
+        #"{"access_token":"fixture-only","super_user":true,"user_id":1,"user_name":"Fixture"}"#.utf8
+      ))
+    var failures: [String] = []
+    let isolated = WebCoordinator(
+      instance: instance,
+      authentication: AuthenticationResult(session: session, cookies: []),
+      onAuthenticationRequired: {}, onConnectionFailed: { failures.append($0) })
+    isolated.webView(
+      isolated.webView, didFailProvisionalNavigation: nil,
+      withError: URLError(.cannotConnectToHost))
+    XCTAssertEqual(failures.count, 1)
+    XCTAssertFalse(failures[0].isEmpty)
+    isolated.stop()
+    isolated.webView(
+      isolated.webView, didFailProvisionalNavigation: nil,
+      withError: URLError(.cannotConnectToHost))
+    XCTAssertEqual(
+      failures.count, 1, "Stopped sessions must not replace the active connection screen")
   }
 
   func testDeviceFactorySelectsIsolatedImplementations() throws {
