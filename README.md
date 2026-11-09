@@ -1,14 +1,18 @@
 # MoviePilot-App
 
+本 fork 为 iPhone Duo 提供独立的系统导航容器，让 UIKit 处理折叠及分屏时的侧边工具栏和标签栏；iPhone 18 等其他机型继续运行原版导航代码。见[自适应导航与验证](guides/adaptive-navigation.md)。
+
 MoviePilot 的 iOS 客户端。使用系统原生导航、搜索和快捷面板，业务页面、弹窗内容和插件界面继续复用 MoviePilot-Frontend。
 
 iOS 26+ 支持系统 Liquid Glass；提供侧滑返回、卡片长按菜单、原生弹窗及前后台恢复。[查看界面截图](screenshots/README.md)。
 
 ## 下载与安装
 
-需要 **iOS 17+**、自己的 Apple 账户和 MoviePilot 实例。独立原生搜索需要同时更新至本次重建的 [MoviePilot-Frontend v3.2.4](https://github.com/jxxghp/MoviePilot-Frontend/releases/tag/v3.2.4) 或更新的兼容版本；旧前端继续使用原搜索浮层。
+需要 **iOS 16+**、自己的 Apple 账户和 MoviePilot 实例。独立原生搜索需要同时更新至本次重建的 [MoviePilot-Frontend v3.2.4](https://github.com/jxxghp/MoviePilot-Frontend/releases/tag/v3.2.4) 或更新的兼容版本；旧前端继续使用原搜索浮层。
 
 在 [最新 Release](https://github.com/jxxghp/MoviePilot-App/releases/latest) 下载未签名 IPA，通过 SideStore、AltStore Classic 或 Sideloadly 重签安装。免费账户可用，签名通常每 7 天续签；配置步骤见[安装与自动续签](guides/install.md)。
+
+安装包默认开启生产 APNs，Bundle ID 为 `com.moviepilot.app`；原生消息推送仍需带 Push Notifications 权限的签名和描述文件。免费账户重签须移除推送权限并使用主屏幕通知，详见[消息通知](guides/notifications.md)。
 
 ## 使用与开发文档
 

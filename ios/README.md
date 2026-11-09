@@ -4,7 +4,7 @@
 
 普通用户可直接[下载 Release IPA 并安装](../guides/install.md)，无需编译。本页适用于需要修改源码或使用 Xcode 的开发者。
 
-需要 Mac、Xcode 26 或更新版本、Apple 账户和 iOS 17+ 设备。本地构建验证使用 Xcode 27.1 / iOS SDK 27.1。
+需要 Mac、Xcode 26 或更新版本、Apple 账户和 iOS 16+ 设备。本地构建验证使用 Xcode 27.1 / iOS SDK 27.1。
 
 ## 使用 Xcode 安装
 
@@ -24,7 +24,9 @@ open ios/MoviePilot.xcodeproj
 2. 选择 `MoviePilot` 工程，分别为 `MoviePilot` 和 `MoviePilotWidgets` Target 配置 **Signing & Capabilities**。
 3. 打开 **Automatically manage signing**，将 **Team** 选为自己的 Personal Team 或开发者团队。
 4. 将主 App 的 **Bundle Identifier** 改为自己唯一的值，例如 `com.yourname.moviepilot`，扩展使用相同前缀，例如 `com.yourname.moviepilot.widgets`。
-5. 两个 Target 使用同一个 **App Groups**。个人构建可在两份 `Widgets.entitlements` 中将组名改为 `group.org.moviepilot.widgets.你的10位TeamID`，并在两个 Target 的能力面板选中该组；不要只修改其中一个。小组件的启用与使用见[系统小组件](../guides/widgets.md)。只改本机签名配置，不提交团队信息、证书或描述文件。
+5. 两个 Target 使用同一个 **App Groups**。个人构建可在主 App 实际使用的 entitlement 文件与扩展的 `Widgets.entitlements` 中，将组名改为 `group.org.moviepilot.widgets.你的10位TeamID`，并在两个 Target 的能力面板选中该组；不要只修改其中一个。小组件的启用与使用见[系统小组件](../guides/widgets.md)。只改本机签名配置，不提交团队信息、证书或描述文件。
+
+工程默认启用生产 APNs，主 App 使用 `MoviePilot/Resources/APNs.entitlements`，其中也保留共享组；使用原生推送时须将它与扩展的 `Widgets.entitlements` 配成同一共享组。免费 Personal Team 构建须将 `MOVIEPILOT_APNS_ENVIRONMENT` 设为 `disabled`，并把主 App 的 `CODE_SIGN_ENTITLEMENTS` 改为 `MoviePilot/Resources/Widgets.entitlements`；开发 APNs 签名改用 `development` 和匹配的描述文件。详见[消息通知](../guides/notifications.md)。
 
 免费 Apple 账户可通过 Personal Team 在自己的设备上运行。免费签名的描述文件通常 **7 天到期**，届时需重新连接 Xcode 构建安装；它不等于 TestFlight 或 App Store 分发资格。限制以 [Apple 个人团队说明](https://developer.apple.com/help/account/basics/about-your-developer-account#enable-a-personal-team-in-xcode) 为准。
 
@@ -47,12 +49,12 @@ open ios/MoviePilot.xcodeproj
 ## 构建未签名 IPA
 
 ```sh
-bash scripts/build-ipa.sh 1.1.1
+bash scripts/build-ipa.sh 1.2.1
 ```
 
-从仓库根目录执行，产物位于 `artifacts/MoviePilot-1.1.1-unsigned.ipa`，同时生成 `SHA256SUMS`。脚本使用真机 iPhoneOS SDK 和 arm64 架构，校验版本、ZIP 及 Mach-O 平台；安装者仍须自行重签。
+从仓库根目录执行，产物位于 `artifacts/MoviePilot-1.2.1-unsigned.ipa`，同时生成 `SHA256SUMS`。脚本使用真机 iPhoneOS SDK 和 arm64 架构，默认 `com.moviepilot.app` 与生产 APNs，保留主包的推送/共享组和扩展的共享组元数据，并校验版本、ZIP 及 Mach-O 平台；安装者仍须自行重签。
 
-工程当前版本为 1.1.1、构建号为 1。发布新版本时先更新 `ios/project.yml` 与已提交工程中的版本号，再将 `v主版本.次版本.修订版本` 标签推到 GitHub。`Release IPA` 会复用现有检查，成功后构建对应版本并发布 IPA 和校验文件。
+工程当前版本为 1.2.1、构建号为 1。主 App 的最低系统版本为 iOS 16.0，支持 iPhone 与 iPad；iPhone Duo 的合拢、半展开和完全展开姿态由同一套可调整窗口布局承载。小组件仍要求 iOS 17.0，iOS 26+ 使用系统 Liquid Glass。发布新版本时先更新 ios/project.yml 与已提交工程中的版本号，再将版本标签推到 GitHub。Release IPA 会复用现有检查，成功后构建对应版本并发布 IPA 和校验文件。
 
 同版本修复在 `main` 的 Actions → `Release IPA` → `Run workflow` 中操作：填写现有标签，勾选同版本重建确认。检查与打包通过后，工作流将该标签和 Release 资产更新为本次 `main` 源码；若构建期间主分支或标签变化则停止发布。普通标签发布仍拒绝覆盖已有 Release。用户从同一 Release 重新下载 IPA 后覆盖安装即可。
 
@@ -81,7 +83,7 @@ TEST_RUNNER_MOVIEPILOT_E2E_SERVICE_WAIT=1 xcodebuild test \
   -only-testing:MoviePilotUITests/ServiceStartupTests CODE_SIGN_IDENTITY=-
 ```
 
-该验收覆盖 HTTP 暂不可用、连接中断、自动恢复登录与 Keychain 会话、后台暂停、手动重试、切换地址、初始化与损坏响应，以及密码不自动重发。合成服务不连接真实后端。
+该验收覆盖 HTTP 暂不可用、连接中断、十五秒连接超时返回地址列表、挂起请求的迟到响应、网页连接失败、自动恢复登录与 Keychain 会话、后台暂停、手动重试、切换地址、初始化与损坏响应，以及密码不自动重发。合成服务不连接真实后端。
 
 多服务和密码记忆回归复用同一夹具，在两个终端分别运行：
 
@@ -124,6 +126,27 @@ TEST_RUNNER_MOVIEPILOT_E2E_SHEET_RACE=1 xcodebuild test \
 
 用例从推荐、探索和更多入口交替通过卡片按钮与长按菜单发起搜索，连续验证 12 次站点筛选和资源页跳转。后半段扩大归还绘制确认与路由切换交错的窗口，检查导航未进入恢复页、Sheet 样式已清除且资源页属于当前入口。
 
+插件配置保存回归使用真实前端和固定合成插件，不连接真实实例，也不安装插件：
+
+```sh
+# App 仓库没有虚拟环境时，使用工作区主仓已配置的虚拟环境。
+../MoviePilot/.venv/bin/python scripts/plugin-save-fixture.py --frontend ../MoviePilot-Frontend/dist
+# 另开终端，在专用模拟器运行；可以复用已编译的测试产物。
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+TEST_RUNNER_MOVIEPILOT_E2E_PLUGIN_SAVE=1 \
+TEST_RUNNER_MOVIEPILOT_E2E_SERVER=http://127.0.0.1:5312 \
+TEST_RUNNER_MOVIEPILOT_E2E_USERNAME=startup-fixture \
+TEST_RUNNER_MOVIEPILOT_E2E_PASSWORD=fixture-only \
+xcodebuild test -project ios/MoviePilot.xcodeproj -scheme MoviePilot \
+  -destination 'platform=iOS Simulator,id=你的模拟器UUID' \
+  -only-testing:MoviePilotUITests/NativeFrameworkTests/testPluginConfigurationSaveKeepsNavigation \
+  CODE_SIGNING_ALLOWED=NO
+```
+
+用例覆盖立即、短延迟和一秒延迟保存，以及保存失败后保留输入并手动重试；核对五次点击对应五次请求，完成后可继续打开原生更多页面。协议事件只记录弹窗声明与命令结果，不记录认证信息。
+
+同一夹具还可运行 `NativeFrameworkTests/testModalBackgroundsAcrossThemes`，覆盖浅深主题下反复打开插件配置和原生插件面板。iOS 26 以前会检查内容及标题栏空白处的截图像素，确认不透明主题底色；iOS 26+ 保留系统材质并记录截图。新系统上的通过结果不能代替旧系统真机验收。
+
 ```text
 ios/          UIKit / WKWebView App、资源与 UI 测试
 Sources/      可独立编译的 Swift 核心
@@ -136,6 +159,10 @@ scripts/      本地验证入口
 桌面图标在 `AppIcon.appiconset` 中配置 Any、Dark、Tinted 三种外观。浅色图标复用前端的 `scripts/assets/moviepilot-logo-master.png` 和 `scripts/generate-pwa-icons.mjs` 中的 `createSquareIcon`，按 1024×1024、0.76 标识比例生成；深色图标保留原资源，着色图标以同一母版、尺寸和比例生成黑底灰度图，最终色调由 iOS 处理。图标外观及兼容范围见[连接与兼容性](../guides/connection.md)。
 
 仍需完成真实 iPhone、横屏/键盘完整矩阵、文件/外链、前后台与内容进程恢复、OTP/签名 Keychain 和 APNs 的完整验收。Android 延后规划。
+
+原生通知配置回归使用 `scripts/notification-setup-fixture.py --frontend /path/to/frontend/dist`，仅监听回环端口 5306。指定全新专用模拟器，传入 `TEST_RUNNER_MOVIEPILOT_E2E_SERVER=http://127.0.0.1:5306`、`TEST_RUNNER_MOVIEPILOT_E2E_NOTIFICATION_SETUP=http://127.0.0.1:5306`、`TEST_RUNNER_MOVIEPILOT_E2E_USERNAME=startup-fixture`、`TEST_RUNNER_MOVIEPILOT_E2E_PASSWORD=fixture-only`，执行 `NativeFrameworkTests/testNativeNotificationSetupRecoversWithoutLogin`。用例验证渠道未启用及身份缺失时不先申请系统权限、后台恢复后直接重试，并拒绝系统授权以避免实际注册；这不代替 Apple 投递验收。
+
+后台通知点击回归给同一夹具增加 `--simulator 专用模拟器UUID`，设置 `TEST_RUNNER_MOVIEPILOT_E2E_NOTIFICATION_TAP=http://127.0.0.1:5306`，执行 `NativeFrameworkTests/testBackgroundNotificationTapKeepsAppAlive`。该用例允许模拟器系统通知后，通过 `simctl push` 注入有效、无效与其他账号的合成载荷，实际点击系统横幅，验证后台恢复及通知中心，不向外部服务发送推送。旧的非隔离 async 通知代理会在 UIKit 状态恢复时崩溃；显式完成回调必须在主线程执行。模拟器注入不代替 Apple APNs 真机投递验收。
 
 独立搜索页面可使用隔离服务与当前前端开发服务器验收，不连接真实后端，也无需反复构建前端：
 

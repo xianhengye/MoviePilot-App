@@ -13,10 +13,406 @@ private struct NetworkFixtures: Decodable {
 /// 使用显式配置的实例验收原生框架与原业务 HTML；真实写入须另行开启并限定临时插件。
 @MainActor
 final class NativeFrameworkTests: XCTestCase {
+  /// 配置保存与面板在浅深主题下反复打开；旧系统检查最终像素，防止透明背景露出底页。
+  func testModalBackgroundsAcrossThemes() async throws {
+    guard ProcessInfo.processInfo.environment["MOVIEPILOT_E2E_PLUGIN_SAVE"] == "1",
+      ProcessInfo.processInfo.environment["MOVIEPILOT_E2E_SERVER"] == "http://127.0.0.1:5312"
+    else { throw XCTSkip("弹窗背景验收需要本机合成插件夹具。") }
+    try await pluginSaveFixture("config", value: ["reset": true])
+    let app = try signIn(captureScreens: false, remember: false)
+    defer { app.terminate() }
+    let plugin = app.webViews.staticTexts.matching(
+      NSPredicate(format: "label BEGINSWITH %@", "保存回归插件")
+    ).firstMatch
+    for (theme, style) in [("浅色", UIUserInterfaceStyle.light), ("深色", .dark)] {
+      selectTheme(theme, app: app)
+      XCTAssertTrue(plugin.waitForExistence(timeout: 15), app.debugDescription)
+      for cycle in 1...2 {
+        plugin.tap()
+        let sheet = app.otherElements["native-web-sheet"]
+        XCTAssertTrue(sheet.waitForExistence(timeout: 10), app.debugDescription)
+        settlePage(app)
+        XCTAssertTrue(app.webViews.textFields["测试配置"].isHittable)
+        assertModalBackground(sheet, app: app, style: style, name: "配置-\(theme)-\(cycle)")
+        app.webViews.buttons["保存"].firstMatch.tap()
+        XCTAssertTrue(sheet.waitForNonExistence(timeout: 10))
+        let restored = XCTNSPredicateExpectation(
+          predicate: NSPredicate { _, _ in plugin.isHittable }, object: nil)
+        XCTAssertEqual(
+          XCTWaiter.wait(for: [restored], timeout: 10), .completed,
+          "配置保存后应保留原插件列表：\(app.debugDescription)")
+      }
+      rootNavigation(app).buttons["更多"].tap()
+      XCTAssertTrue(app.tables["more-menu"].waitForExistence(timeout: 10))
+      app.buttons["操作菜单"].tap()
+      app.buttons["插件面板"].firstMatch.tap()
+      let panel = app.tables["native-quick-panel"]
+      XCTAssertTrue(panel.waitForExistence(timeout: 10), app.debugDescription)
+      let tile = panel.buttons.matching(
+        NSPredicate(format: "label BEGINSWITH %@", "面板回归插件")
+      ).firstMatch
+      XCTAssertTrue(tile.waitForExistence(timeout: 10), app.debugDescription)
+      XCTAssertTrue(tile.isHittable)
+      assertModalBackground(panel, app: app, style: style, name: "插件面板-\(theme)")
+      app.buttons["native-panel-close"].tap()
+      XCTAssertTrue(panel.waitForNonExistence(timeout: 10))
+      // 返回同一个业务页，再次切换主题，覆盖背景与 WebView 归还后的重用。
+      openMorePage("插件", app: app)
+      XCTAssertTrue(plugin.waitForExistence(timeout: 15), app.debugDescription)
+      XCTAssertFalse(app.staticTexts["暂时无法打开 MoviePilot"].exists)
+    }
+    selectTheme("跟随系统", app: app)
+  }
+
+  /// 采样内容与导航栏的空白边缘；iOS 26+ 保留系统材质，只留截图供外观检查。
+  private func assertModalBackground(
+    _ content: XCUIElement, app: XCUIApplication, style: UIUserInterfaceStyle, name: String
+  ) {
+    settlePage(app)
+    let screenshot = XCUIScreen.main.screenshot()
+    let attachment = XCTAttachment(screenshot: screenshot)
+    attachment.name = "弹窗背景-\(name)"
+    attachment.lifetime = .keepAlways
+    add(attachment)
+    if #available(iOS 26.0, *) { return }
+    guard let image = screenshot.image.cgImage else {
+      XCTFail("无法读取弹窗截图")
+      return
+    }
+    let scale = CGFloat(image.width) / app.frame.width
+    // 系统 Sheet 使用 elevated 层级，深色语义背景与底页的 base 层级不同。
+    let expected = UIColor.systemBackground.resolvedColor(
+      with: UITraitCollection(traitsFrom: [
+        UITraitCollection(userInterfaceStyle: style),
+        UITraitCollection(userInterfaceLevel: .elevated),
+      ]))
+    var red: CGFloat = 0
+    var green: CGFloat = 0
+    var blue: CGFloat = 0
+    expected.getRed(&red, green: &green, blue: &blue, alpha: nil)
+    let closeID =
+      content.identifier == "native-web-sheet" ? "native-sheet-close" : "native-panel-close"
+    let bar = app.navigationBars.containing(.button, identifier: closeID).firstMatch
+    XCTAssertTrue(bar.exists)
+    for frame in [content.frame, bar.frame] {
+      let area = CGRect(
+        x: (frame.minX + 4) * scale, y: frame.midY * scale,
+        width: 2 * scale, height: 8 * scale)
+      guard let sample = image.cropping(to: area) else {
+        XCTFail("弹窗采样区域必须位于截图内")
+        continue
+      }
+      var pixel = [UInt8](repeating: 0, count: 4)
+      let context = CGContext(
+        data: &pixel, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+      context?.draw(sample, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+      for (index, component) in [red, green, blue].enumerated() {
+        XCTAssertEqual(
+          Double(pixel[index]) / 255, Double(component), accuracy: 0.04,
+          "\(name)：旧系统应显示不透明主题底色，RGB=\(pixel)")
+      }
+    }
+  }
+
+  /// 快慢保存、失败与重试均使用真实 Vue 表单，每次点击只能发起一次保存且保留导航。
+  func testPluginConfigurationSaveKeepsNavigation() async throws {
+    guard ProcessInfo.processInfo.environment["MOVIEPILOT_E2E_PLUGIN_SAVE"] == "1",
+      ProcessInfo.processInfo.environment["MOVIEPILOT_E2E_SERVER"] == "http://127.0.0.1:5312"
+    else { throw XCTSkip("插件保存需要本机合成插件夹具。") }
+    try await pluginSaveFixture("config", value: ["reset": true])
+    let app = try signIn(captureScreens: false, remember: false)
+    let plugin = app.webViews.staticTexts.matching(
+      NSPredicate(format: "label BEGINSWITH %@", "保存回归插件")
+    ).firstMatch
+    let sheet = app.otherElements["native-web-sheet"]
+    let save = app.webViews.buttons["保存"].firstMatch
+    for delay in [0.0, 0.2, 1.0] {
+      try await pluginSaveFixture("config", value: ["delay": delay])
+      XCTAssertTrue(plugin.waitForExistence(timeout: 20), app.debugDescription)
+      plugin.tap()
+      XCTAssertTrue(save.waitForExistence(timeout: 15), app.debugDescription)
+      XCTAssertTrue(save.isHittable)
+      save.tap()
+      XCTAssertTrue(sheet.waitForNonExistence(timeout: 15), app.debugDescription)
+      XCTAssertFalse(app.staticTexts["暂时无法打开 MoviePilot"].exists, app.debugDescription)
+    }
+    try await pluginSaveFixture("config", value: ["delay": 1, "failure": true])
+    plugin.tap()
+    XCTAssertTrue(save.waitForExistence(timeout: 15), app.debugDescription)
+    let field = app.webViews.textFields["测试配置"]
+    XCTAssertTrue(field.exists, app.debugDescription)
+    field.tap()
+    field.typeText("重试")
+    let done = app.toolbars.buttons["完成"]
+    XCTAssertTrue(done.waitForExistence(timeout: 5), app.debugDescription)
+    done.tap()
+    XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5))
+    XCTAssertTrue(save.isHittable)
+    save.tap()
+    try await waitForPluginSaveCompletion(4)
+    XCTAssertTrue(app.buttons["native-sheet-close"].waitForExistence(timeout: 10))
+    XCTAssertTrue(save.isHittable, "保存失败后应恢复可编辑表单")
+    XCTAssertTrue((field.value as? String)?.contains("重试") == true)
+    XCTAssertFalse(app.staticTexts["暂时无法打开 MoviePilot"].exists)
+    try await pluginSaveFixture("config", value: ["delay": 1])
+    save.tap()
+    XCTAssertTrue(sheet.waitForNonExistence(timeout: 15), app.debugDescription)
+    XCTAssertFalse(app.staticTexts["暂时无法打开 MoviePilot"].exists, app.debugDescription)
+    let state = try await pluginSaveFixture("state")
+    let saves = try XCTUnwrap(state["saves"] as? [[String: String]])
+    XCTAssertEqual(saves.count, 5, "归还重试不能重发业务保存")
+    XCTAssertEqual(saves[3], saves[4], "失败后的手动重试应保留原表单输入")
+    rootNavigation(app).buttons["更多"].tap()
+    XCTAssertTrue(app.tables["more-menu"].waitForExistence(timeout: 10), app.debugDescription)
+    attachScreen("插件保存后导航", app: app, dismissUpdateReminder: false)
+  }
+
+  /// 失败分支等待合成服务实际完成响应，避免依赖一闪而过的进度控件。
+  private func waitForPluginSaveCompletion(_ count: Int) async throws {
+    for _ in 0..<50 {
+      if try await pluginSaveFixture("state")["completed"] as? Int == count { return }
+      try await Task.sleep(for: .milliseconds(100))
+    }
+    XCTFail("插件保存未完成预期响应")
+  }
+
+  /// 测试控制固定在回环端口，不接受真实实例地址或认证材料。
+  @discardableResult
+  private func pluginSaveFixture(_ path: String, value: [String: Any]? = nil) async throws
+    -> [String: Any]
+  {
+    var request = URLRequest(url: URL(string: "http://127.0.0.1:5312/__plugin/\(path)")!)
+    if let value {
+      request.httpMethod = "POST"
+      request.httpBody = try JSONSerialization.data(withJSONObject: value)
+      request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    }
+    let (data, response) = try await URLSession.shared.data(for: request)
+    XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+    return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+  }
+
+  /// 使用私有配置登录或复用真实会话，只读检查旋转、搜索键盘、导航几何和前后台恢复。
+  func testReadOnlyDeviceCompatibility() throws {
+    continueAfterFailure = false
+    guard ProcessInfo.processInfo.environment["MOVIEPILOT_E2E_COMPATIBILITY"] == "1" else {
+      throw XCTSkip("需要专用模拟器的真实会话或私有登录配置，并显式启用只读兼容性验收。")
+    }
+    let app: XCUIApplication
+    if ProcessInfo.processInfo.environment["MOVIEPILOT_E2E_PASSWORD"] != nil {
+      app = try signIn(captureScreens: false)
+    } else {
+      app = XCUIApplication()
+      app.launch()
+    }
+    let isDuoSimulator =
+      ProcessInfo.processInfo.environment["SIMULATOR_MODEL_IDENTIFIER"] == "iPhone19,4"
+    let roots = rootNavigation(app)
+    let operationBar = duoOperationBar(app)
+    if isDuoSimulator {
+      XCTAssertTrue(operationBar.waitForExistence(timeout: 45), "Duo 应注册到系统操作栏")
+      XCTAssertFalse(roots.exists, "Duo 不应再绘制自定义底部导航")
+    } else {
+      XCTAssertTrue(roots.waitForExistence(timeout: 45), "真实登录会话应恢复至原生导航")
+    }
+    defer { XCUIDevice.shared.orientation = .portrait }
+    for orientation in [UIDeviceOrientation.portrait, .landscapeLeft, .portrait] {
+      XCUIDevice.shared.orientation = orientation
+      let rootContainer = isDuoSimulator ? operationBar : roots
+      rootContainer.buttons["更多"].tap()
+      let menu = app.tables["more-menu"]
+      XCTAssertTrue(menu.waitForExistence(timeout: 15))
+      let action = app.buttons["native-bottom-action"]
+      XCTAssertTrue(action.isHittable, "窗口变化后搜索按钮仍应可点击")
+      let rootButtons = rootContainer.buttons.allElementsBoundByIndex.filter {
+        !isDuoSimulator || $0.identifier.hasPrefix("native-root-")
+      }
+      XCTAssertEqual(rootButtons.count, 4, "主导航应保留四个入口")
+      if isDuoSimulator {
+        // Duo 的系统栏位于活动内屏，XCUIApplication.frame 可能仍指向未激活的外屏。
+        XCTAssertTrue(rootContainer.exists, "Duo 系统操作栏必须可访问")
+        XCTAssertTrue(rootContainer.frame.insetBy(dx: -1, dy: -1).contains(action.frame))
+        XCTAssertLessThanOrEqual(action.frame.maxX, rootContainer.frame.maxX + 1)
+        XCTAssertGreaterThanOrEqual(action.frame.minX, rootContainer.frame.minX - 1)
+        for rootButton in rootButtons {
+          XCTAssertGreaterThanOrEqual(rootButton.frame.minX, rootContainer.frame.minX - 1)
+          XCTAssertLessThanOrEqual(rootButton.frame.maxX, rootContainer.frame.maxX + 1)
+        }
+      } else {
+        XCTAssertTrue(app.frame.insetBy(dx: -1, dy: -1).contains(action.frame))
+        for rootButton in rootButtons {
+          XCTAssertTrue(
+            app.frame.insetBy(dx: -1, dy: -1).contains(rootButton.frame),
+            "主导航入口必须留在窗口内")
+          XCTAssertFalse(rootButton.frame.intersects(action.frame), "动作与主导航入口不得重叠")
+        }
+        if let lastRoot = rootButtons.last {
+          XCTAssertGreaterThanOrEqual(
+            action.frame.minX - lastRoot.frame.maxX, 8,
+            "动态动作与主导航最后入口之间应保留可点击间距")
+        }
+      }
+      attachScreen("兼容性-更多-\(orientation.rawValue)", app: app, dismissUpdateReminder: false)
+      action.tap()
+      let page = app.tables["native-search-page"]
+      XCTAssertTrue(page.waitForExistence(timeout: 15))
+      let field = app.searchFields["native-search-field"]
+      XCTAssertTrue(field.isHittable)
+      field.tap()
+      if field.value as? String == "窗口适配" {
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 4))
+      }
+      field.typeText("窗口适配")
+      attachScreen("兼容性-搜索键盘-\(orientation.rawValue)", app: app, dismissUpdateReminder: false)
+      XCUIDevice.shared.orientation =
+        orientation == .portrait ? .landscapeLeft : .portrait
+      XCTAssertTrue(page.waitForExistence(timeout: 10))
+      XCTAssertEqual(field.value as? String, "窗口适配", "旋转不得重建搜索输入或账号会话")
+      attachScreen(
+        "兼容性-旋转保留搜索输入-\(orientation.rawValue)", app: app, dismissUpdateReminder: false)
+      dismissKeyboardIfVisible(app)
+      let topActions = app.buttons["native-top-actions"]
+      XCTAssertTrue(topActions.waitForExistence(timeout: 10), "搜索提交后顶栏操作按钮仍应存在")
+      topActions.tap()
+      attachScreen("兼容性-操作菜单-\(orientation.rawValue)", app: app, dismissUpdateReminder: false)
+      // 折叠窗口上的系统菜单可能覆盖顶栏按钮，重新激活应用统一收起它。
+      app.activate()
+      let interactionSurface: XCUIElement = isDuoSimulator ? app.windows.firstMatch : app
+      if isDuoSimulator {
+        interactionSurface.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.65)).tap()
+      }
+      app.typeKey(XCUIKeyboardKey.escape, modifierFlags: [])
+      dismissKeyboardIfVisible(app)
+      let edgeStart = interactionSurface.coordinate(
+        withNormalizedOffset: CGVector(dx: 0.01, dy: 0.5))
+      let edgeEnd = interactionSurface.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+      edgeStart.press(forDuration: 0.1, thenDragTo: edgeEnd)
+      let back = app.buttons["返回"]
+      if back.exists { back.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap() }
+      let dashboard = (isDuoSimulator ? operationBar : roots).buttons["仪表盘"]
+      XCTAssertTrue(dashboard.waitForExistence(timeout: 10), "窗口变化后仪表盘入口仍应存在")
+      let hittable = XCTNSPredicateExpectation(
+        predicate: NSPredicate(format: "hittable == true"), object: dashboard)
+      XCTAssertEqual(
+        XCTWaiter.wait(for: [hittable], timeout: 5), .completed,
+        "收起键盘后仪表盘入口必须可点击")
+      dashboard.tap()
+      XCTAssertTrue(app.navigationBars["仪表盘"].waitForExistence(timeout: 15))
+      attachScreen("兼容性-仪表盘-\(orientation.rawValue)", app: app, dismissUpdateReminder: false)
+    }
+    XCUIDevice.shared.press(.home)
+    app.activate()
+    XCTAssertTrue(nativeRootBar(app).waitForExistence(timeout: 20), "前后台切换不能丢失真实会话")
+    XCTAssertFalse(app.otherElements["native-startup-screen"].exists)
+    attachScreen("兼容性-前后台恢复", app: app, dismissUpdateReminder: false)
+  }
+
+  /// 在最新 iPhone Duo 模拟器上验证入口和搜索动作注册到系统操作栏，并确认路由有效。
+  func testIPhoneDuoUsesSystemOperationBar() throws {
+    guard ProcessInfo.processInfo.environment["SIMULATOR_MODEL_IDENTIFIER"] == "iPhone19,4" else {
+      throw XCTSkip("仅在 iPhone Duo 模拟器验证侧边操作栏。")
+    }
+    let app = try signIn(captureScreens: false, remember: false)
+    dismissKeyboardIfVisible(app)
+    let rail = duoOperationBar(app)
+    XCTAssertTrue(rail.waitForExistence(timeout: 30), app.debugDescription)
+    XCTAssertFalse(rootNavigation(app).exists)
+    let populated = XCTNSPredicateExpectation(
+      predicate: NSPredicate { _, _ in
+        rail.buttons.allElementsBoundByIndex.filter { $0.identifier.hasPrefix("native-root-") }
+          .count == 4
+      }, object: nil)
+    XCTAssertEqual(XCTWaiter.wait(for: [populated], timeout: 12), .completed, app.debugDescription)
+    let roots = rail.buttons.allElementsBoundByIndex.filter {
+      $0.identifier.hasPrefix("native-root-")
+    }
+    XCTAssertEqual(roots.count, 4)
+    for root in roots {
+      XCTAssertGreaterThanOrEqual(root.frame.minX, rail.frame.minX - 1)
+      XCTAssertLessThanOrEqual(root.frame.maxX, rail.frame.maxX + 1)
+      XCTAssertGreaterThanOrEqual(root.frame.height, 32)
+    }
+    let action = app.buttons["native-bottom-action"]
+    XCTAssertTrue(action.waitForExistence(timeout: 12))
+    XCTAssertGreaterThanOrEqual(action.frame.minX, rail.frame.minX - 1)
+    XCTAssertLessThanOrEqual(action.frame.maxX, rail.frame.maxX + 1)
+    attachScreen("Duo-侧边操作栏", app: app, dismissUpdateReminder: false)
+    rail.buttons["推荐"].tap()
+    XCTAssertTrue(app.navigationBars["推荐"].waitForExistence(timeout: 15))
+    attachScreen("Duo-侧边操作栏-路由点击", app: app, dismissUpdateReminder: false)
+  }
+
+  /// iPad 的可见胶囊与动作严格同高，不能再用含安全区的外框高度代替栏体高度验收。
+  func testIPadBottomNavigationKeepsFullTitles() throws {
+    guard UIDevice.current.userInterfaceIdiom == .pad else {
+      throw XCTSkip("仅在 iPad 验证上下排列的底栏文案。")
+    }
+    let app = try signIn(captureScreens: false)
+    defer { XCUIDevice.shared.orientation = .portrait }
+    for orientation in [UIDeviceOrientation.portrait, .landscapeLeft] {
+      XCUIDevice.shared.orientation = orientation
+      let bar = rootNavigation(app)
+      XCTAssertTrue(bar.waitForExistence(timeout: 15))
+      bar.buttons["仪表盘"].tap()
+      settlePage(app)
+      attachScreen("iPad-底栏尺寸-\(orientation.rawValue)", app: app, dismissUpdateReminder: false)
+      let geometry = XCTAttachment(
+        string:
+          "bar=\(bar.frame)\naction=\(app.buttons["native-bottom-action"].frame)\n\(app.debugDescription)"
+      )
+      geometry.name = "iPad 底栏实际几何"
+      geometry.lifetime = .keepAlways
+      add(geometry)
+      XCTAssertGreaterThanOrEqual(bar.frame.width, 400, "全宽 iPad 不能沿用手机窄底栏")
+      let action = app.buttons["native-bottom-action"]
+      XCTAssertEqual(bar.frame.height, 64, accuracy: 1, "只量可见胶囊，不包含底部安全区")
+      XCTAssertEqual(bar.frame.minY, action.frame.minY, accuracy: 1, "两组可见控件顶部对齐")
+      XCTAssertEqual(bar.frame.maxY, action.frame.maxY, accuracy: 1, "两组可见控件底部对齐")
+      for title in ["仪表盘", "推荐", "探索", "更多"] {
+        let button = bar.buttons[title]
+        XCTAssertTrue(button.isHittable)
+        XCTAssertEqual(button.label, title)
+        XCTAssertGreaterThanOrEqual(button.frame.width, 88, "每个入口应容纳完整文案")
+        XCTAssertGreaterThanOrEqual(button.frame.height, 56, "图标与标题不能挤回旧的 49pt 内容区")
+      }
+      assertBottomLayout(app)
+      attachScreen("iPad-完整底栏文案-\(orientation.rawValue)", app: app, dismissUpdateReminder: false)
+    }
+  }
+
+  /// 旧系统在旋转和路由切换后仍保留完整高度，覆盖 1.1.3 的 49pt 栏体配 64pt 动作错位。
+  func testLegacyBottomNavigationKeepsActionsAligned() throws {
+    if #available(iOS 26, *) { throw XCTSkip("需要 iOS 16–25 的旧系统 Runtime。") }
+    let app = try signIn(captureScreens: false)
+    defer { XCUIDevice.shared.orientation = .portrait }
+    let bar = rootNavigation(app)
+    XCTAssertTrue(bar.waitForExistence(timeout: 15))
+    for orientation in [UIDeviceOrientation.portrait, .landscapeLeft, .portrait] {
+      XCUIDevice.shared.orientation = orientation
+      bar.buttons["仪表盘"].tap()
+      settlePage(app)
+      assertBottomLayout(app)
+      let action = app.buttons["native-bottom-action"]
+      XCTAssertEqual(bar.frame.height, 64, accuracy: 1)
+      XCTAssertEqual(bar.frame.minY, action.frame.minY, accuracy: 1)
+      XCTAssertEqual(bar.frame.maxY, action.frame.maxY, accuracy: 1)
+      for title in ["仪表盘", "推荐", "探索", "更多"] {
+        let button = bar.buttons[title]
+        XCTAssertTrue(button.isHittable)
+        XCTAssertEqual(button.label, title)
+      }
+      attachScreen("旧系统-底栏同高-\(orientation.rawValue)", app: app, dismissUpdateReminder: false)
+      bar.buttons["推荐"].tap()
+      XCTAssertTrue(app.navigationBars["推荐"].waitForExistence(timeout: 15))
+    }
+  }
+
   /// 独立搜索保留来源入口，类型切换改变来源与站点，空关键词不允许提交。
   func testStandaloneNativeSearchPage() throws {
     let app = try signIn(captureScreens: false, remember: false)
-    let roots = app.tabBars["native-root-navigation"]
+    let roots = rootNavigation(app)
     roots.buttons["仪表盘"].tap()
     let bottom = app.buttons["native-bottom-action"]
     XCTAssertTrue(bottom.waitForExistence(timeout: 15))
@@ -151,7 +547,7 @@ final class NativeFrameworkTests: XCTestCase {
   /// 独立搜索不能截住当前栏目重选或用户菜单导航，搜索入口只保留底栏一处。
   func testSearchDoesNotCaptureRootNavigation() throws {
     let app = try signIn(captureScreens: false, remember: false)
-    let roots = app.tabBars["native-root-navigation"]
+    let roots = rootNavigation(app)
     let page = app.tables["native-search-page"]
     for title in ["仪表盘", "推荐", "探索", "更多"] {
       roots.buttons[title].tap()
@@ -189,7 +585,7 @@ final class NativeFrameworkTests: XCTestCase {
   /// 菜单名称直接对应设置功能，兼容旧前端的图标按钮投影。
   func testRecommendDiscoverMenuNames() throws {
     let app = try signIn(captureScreens: false, remember: false)
-    let roots = app.tabBars["native-root-navigation"]
+    let roots = rootNavigation(app)
     for (page, action) in [("推荐", "自定义推荐"), ("探索", "自定义探索")] {
       roots.buttons[page].tap()
       let menuButton = app.buttons["native-top-actions"]
@@ -207,7 +603,7 @@ final class NativeFrameworkTests: XCTestCase {
   /// 真实账号在同一文档中验收明暗壁纸、目录滚动、Sheet 归还与连续主入口切换。
   func testMoreWallpaperContinuity() throws {
     let app = try signIn(captureScreens: false, remember: false)
-    let roots = app.tabBars["native-root-navigation"]
+    let roots = rootNavigation(app)
     settlePage(app)
     app.buttons["操作菜单"].tap()
     nativeUserItem("用户", app: app).tap()
@@ -294,7 +690,7 @@ final class NativeFrameworkTests: XCTestCase {
     alert.buttons["确认"].tap()
     XCTAssertTrue(card.waitForNonExistence(timeout: 30), app.debugDescription)
     XCTAssertFalse(app.staticTexts["暂时无法打开 MoviePilot"].exists, app.debugDescription)
-    let roots = app.tabBars["native-root-navigation"]
+    let roots = rootNavigation(app)
     XCTAssertTrue(roots.waitForExistence(timeout: 10), app.debugDescription)
     roots.buttons["仪表盘"].tap()
     XCTAssertTrue(app.navigationBars["仪表盘"].waitForExistence(timeout: 10), app.debugDescription)
@@ -315,7 +711,7 @@ final class NativeFrameworkTests: XCTestCase {
       if index != 1 { attachScreen("桌面快捷操作-\(title)", app: app) }
     }
     app.buttons["native-panel-close"].tap()
-    XCTAssertTrue(app.tabBars["native-root-navigation"].waitForExistence(timeout: 8))
+    XCTAssertTrue(rootNavigation(app).waitForExistence(timeout: 8))
     app.terminate()
     openHomeScreenShortcut("通知中心", app: app)
     let username = app.textFields["用户名"]
@@ -331,7 +727,7 @@ final class NativeFrameworkTests: XCTestCase {
     XCTAssertTrue(app.navigationBars["通知中心"].waitForExistence(timeout: 45))
     XCTAssertTrue(app.tables["native-quick-panel"].exists)
     app.buttons["native-panel-close"].tap()
-    XCTAssertTrue(app.tabBars["native-root-navigation"].waitForExistence(timeout: 8))
+    XCTAssertTrue(rootNavigation(app).waitForExistence(timeout: 8))
     XCTAssertFalse(app.tables["native-quick-panel"].exists, "已消费的冷启动意图不能重复打开")
   }
 
@@ -400,7 +796,7 @@ final class NativeFrameworkTests: XCTestCase {
     XCTAssertTrue(nativeUserItem("大小", app: app).isSelected)
     attachScreen("资源排序-当前页面二级菜单", app: app)
     app.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.85)).tap()
-    app.tabBars["native-root-navigation"].buttons["仪表盘"].tap()
+    rootNavigation(app).buttons["仪表盘"].tap()
     XCTAssertTrue(app.navigationBars["仪表盘"].waitForExistence(timeout: 10))
     top.tap()
     XCTAssertFalse(nativeUserItem("排序", app: app).exists, "离开资源页面撤销排序 owner")
@@ -416,12 +812,12 @@ final class NativeFrameworkTests: XCTestCase {
     let app = launchConnection(server: base.absoluteString, captureScreens: false)
     let authenticatedOrForm = XCTNSPredicateExpectation(
       predicate: NSPredicate { _, _ in
-        app.textFields["用户名"].exists || app.tabBars["native-root-navigation"].exists
+        app.textFields["用户名"].exists || self.rootNavigation(app).exists
       }, object: nil)
     XCTAssertEqual(XCTWaiter.wait(for: [authenticatedOrForm], timeout: 30), .completed)
     if app.textFields["用户名"].exists { authenticateFixture(app, remember: false) }
-    XCTAssertTrue(app.tabBars["native-root-navigation"].waitForExistence(timeout: 30))
-    app.tabBars["native-root-navigation"].buttons["推荐"].tap()
+    XCTAssertTrue(rootNavigation(app).waitForExistence(timeout: 30))
+    rootNavigation(app).buttons["推荐"].tap()
     var state = try await readonlyCacheState(
       base, path: "/recommend", firstPages: 1, hasCards: true)
     let ui = try XCTUnwrap(state["ui"] as? [String: Any])
@@ -457,7 +853,7 @@ final class NativeFrameworkTests: XCTestCase {
       base, path: "title=RecoveredSnapshot", firstPages: 3, hasCards: true)
     XCUIDevice.shared.press(.home)
     app.activate()
-    XCTAssertTrue(app.tabBars["native-root-navigation"].waitForExistence(timeout: 10))
+    XCTAssertTrue(rootNavigation(app).waitForExistence(timeout: 10))
     try await configureReadonlyCache(
       base, value: ["navigate": "/browse/recommend/tmdb_trending?title=ForegroundSnapshot"])
     state = try await readonlyCacheState(
@@ -468,7 +864,7 @@ final class NativeFrameworkTests: XCTestCase {
       XCTAssertEqual(request["cacheControl"] as? String, "no-store")
     }
     XCTAssertEqual(state["documents"] as? Int, 1)
-    app.tabBars["native-root-navigation"].buttons["更多"].tap()
+    rootNavigation(app).buttons["更多"].tap()
     XCTAssertTrue(app.tables["more-menu"].waitForExistence(timeout: 10))
     XCTAssertFalse(app.staticTexts["暂时无法打开 MoviePilot"].exists)
     let attachment = XCTAttachment(
@@ -531,7 +927,7 @@ final class NativeFrameworkTests: XCTestCase {
       XCTAssertFalse(app.textFields["用户名"].isHittable)
       XCTAssertFalse(app.navigationBars["登录"].exists)
       if mode == "valid" {
-        XCTAssertTrue(app.tabBars["native-root-navigation"].waitForExistence(timeout: 35))
+        XCTAssertTrue(rootNavigation(app).waitForExistence(timeout: 35))
         XCTAssertFalse(app.textFields["用户名"].exists)
       } else {
         XCTAssertTrue(app.textFields["用户名"].waitForExistence(timeout: 15))
@@ -539,7 +935,7 @@ final class NativeFrameworkTests: XCTestCase {
         XCTAssertTrue(app.navigationBars["登录"].exists)
         if mode == "initial" {
           authenticateFixture(app)
-          XCTAssertTrue(app.tabBars["native-root-navigation"].waitForExistence(timeout: 35))
+          XCTAssertTrue(rootNavigation(app).waitForExistence(timeout: 35))
         }
       }
     }
@@ -564,16 +960,16 @@ final class NativeFrameworkTests: XCTestCase {
     // 已签名模拟器会真实恢复 Keychain，会话有效时直接使用首页，避免强求重复登录。
     let authenticatedOrForm = XCTNSPredicateExpectation(
       predicate: NSPredicate { _, _ in
-        app.textFields["用户名"].exists || app.tabBars["native-root-navigation"].exists
+        app.textFields["用户名"].exists || self.rootNavigation(app).exists
       }, object: nil)
     XCTAssertEqual(XCTWaiter.wait(for: [authenticatedOrForm], timeout: 30), .completed)
     if app.textFields["用户名"].exists { authenticateFixture(app, remember: false) }
-    XCTAssertTrue(app.tabBars["native-root-navigation"].waitForExistence(timeout: 30))
+    XCTAssertTrue(rootNavigation(app).waitForExistence(timeout: 30))
     let ready = XCTNSPredicateExpectation(
       predicate: NSPredicate(format: "exists == false"),
       object: app.otherElements["native-startup-screen"])
     XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 45), .completed, app.debugDescription)
-    app.tabBars["native-root-navigation"].buttons["仪表盘"].tap()
+    rootNavigation(app).buttons["仪表盘"].tap()
     let trigger = app.webViews.buttons.matching(
       NSPredicate(format: "label == %@ OR label == %@", "奶龙", "智能助手")
     ).firstMatch
@@ -631,7 +1027,7 @@ final class NativeFrameworkTests: XCTestCase {
     let messages = try XCTUnwrap(state["messages"] as? [[String: Any]])
     XCTAssertEqual((messages.last?["audio_refs"] as? [String])?.count, 1)
     app.buttons["native-sheet-close"].tap()
-    app.tabBars["native-root-navigation"].buttons["更多"].tap()
+    rootNavigation(app).buttons["更多"].tap()
     XCTAssertTrue(app.tables["more-menu"].waitForExistence(timeout: 10))
     XCTAssertFalse(app.staticTexts["暂时无法打开 MoviePilot"].exists)
   }
@@ -656,7 +1052,7 @@ final class NativeFrameworkTests: XCTestCase {
     let base = try await configureSystemLinks(["page": "player", "mode": "healthy", "reset": true])
     let app = try launchLogin(server: base.absoluteString, captureScreens: false)
     authenticateFixture(app, remember: false)
-    XCTAssertTrue(app.tabBars["native-root-navigation"].waitForExistence(timeout: 30))
+    XCTAssertTrue(rootNavigation(app).waitForExistence(timeout: 30))
     XCTAssertTrue(app.staticTexts["星际漫游"].firstMatch.waitForExistence(timeout: 15))
     app.buttons["操作菜单"].tap()
     let play = app.buttons["在线播放"].firstMatch
@@ -668,8 +1064,8 @@ final class NativeFrameworkTests: XCTestCase {
     XCTAssertEqual(XCTWaiter.wait(for: [launched], timeout: 15), .completed)
     XCTAssertTrue(receiver.staticTexts["emby://items?serverId=server-456&itemId=item-123"].exists)
     app.activate()
-    XCTAssertTrue(app.tabBars["native-root-navigation"].waitForExistence(timeout: 10))
-    app.tabBars["native-root-navigation"].buttons["更多"].tap()
+    XCTAssertTrue(rootNavigation(app).waitForExistence(timeout: 10))
+    rootNavigation(app).buttons["更多"].tap()
     XCTAssertTrue(app.tables["more-menu"].waitForExistence(timeout: 10))
     let state = try await systemLinksState(base)
     XCTAssertEqual(state["documents"] as? Int, 1)
@@ -682,7 +1078,7 @@ final class NativeFrameworkTests: XCTestCase {
     let base = try await configureSystemLinks(["page": "apps", "mode": "healthy", "reset": true])
     let app = try launchLogin(server: base.absoluteString, captureScreens: false)
     authenticateFixture(app, remember: false)
-    XCTAssertTrue(app.tabBars["native-root-navigation"].waitForExistence(timeout: 30))
+    XCTAssertTrue(rootNavigation(app).waitForExistence(timeout: 30))
     app.buttons["操作菜单"].tap()
     app.buttons["捷径"].firstMatch.tap()
     let panel = app.tables["native-quick-panel"]
@@ -711,7 +1107,7 @@ final class NativeFrameworkTests: XCTestCase {
     }
     app.buttons["native-sheet-close"].tap()
     for title in ["推荐", "探索", "更多"] {
-      app.tabBars["native-root-navigation"].buttons[title].tap()
+      rootNavigation(app).buttons[title].tap()
       XCTAssertFalse(app.staticTexts["暂时无法打开 MoviePilot"].exists)
     }
     let state = try await systemLinksState(base)
@@ -728,7 +1124,7 @@ final class NativeFrameworkTests: XCTestCase {
     let base = try await configureSystemLinks(["page": "apps", "mode": "healthy", "reset": true])
     let app = try launchLogin(server: base.absoluteString, captureScreens: false)
     authenticateFixture(app, remember: false)
-    XCTAssertTrue(app.tabBars["native-root-navigation"].waitForExistence(timeout: 30))
+    XCTAssertTrue(rootNavigation(app).waitForExistence(timeout: 30))
     try await Task.sleep(for: .seconds(4))
     _ = try await configureSystemLinks(["mode": "down"])
     try await Task.sleep(for: .seconds(3))
@@ -741,7 +1137,7 @@ final class NativeFrameworkTests: XCTestCase {
     XCTAssertTrue((state["pings"] as? [String] ?? []).contains("down"))
     _ = try await configureSystemLinks(["mode": "healthy"])
     authenticateFixture(app, remember: false)
-    XCTAssertTrue(app.tabBars["native-root-navigation"].waitForExistence(timeout: 30))
+    XCTAssertTrue(rootNavigation(app).waitForExistence(timeout: 30))
   }
 
   /// 系统深色使用低曝光壁纸，浅色立即停用图片；实际 UIKit 材质保持系统行为。
@@ -751,7 +1147,7 @@ final class NativeFrameworkTests: XCTestCase {
     ])
     let app = try launchLogin(server: base.absoluteString, captureScreens: false)
     authenticateFixture(app, remember: false)
-    XCTAssertTrue(app.tabBars["native-root-navigation"].waitForExistence(timeout: 30))
+    XCTAssertTrue(rootNavigation(app).waitForExistence(timeout: 30))
     for mode in ["dark", "light"] {
       _ = try await configureSystemLinks(["appearance": mode])
       XCTAssertTrue(app.webViews.staticTexts["存储空间"].waitForExistence(timeout: 15))
@@ -862,7 +1258,7 @@ final class NativeFrameworkTests: XCTestCase {
       if address.buttons.firstMatch.exists { address.buttons.firstMatch.tap() }
       address.typeText("\(server)/bench-\(UUID().uuidString)/\n")
       authenticateFixture(app)
-      XCTAssertTrue(app.tabBars["native-root-navigation"].waitForExistence(timeout: 30))
+      XCTAssertTrue(rootNavigation(app).waitForExistence(timeout: 30))
       samples.append(try await cacheMeasurement(base, phase: "first-\(sample)"))
       app.terminate()
     }
@@ -871,7 +1267,7 @@ final class NativeFrameworkTests: XCTestCase {
       app.launchArguments = ["-AppleLanguages", "(zh-Hans)"]
       let started = Date()
       app.launch()
-      XCTAssertTrue(app.tabBars["native-root-navigation"].waitForExistence(timeout: 30))
+      XCTAssertTrue(rootNavigation(app).waitForExistence(timeout: 30))
       var result = try await cacheMeasurement(base, phase: "cached-\(sample)")
       result["launchToNativeMs"] = Date().timeIntervalSince(started) * 1000
       samples.append(result)
@@ -879,7 +1275,7 @@ final class NativeFrameworkTests: XCTestCase {
     }
     try await resetCacheMeasurement(base, phase: "navigation-and-resume")
     for title in ["推荐", "探索", "更多", "推荐", "探索", "更多", "推荐", "探索", "更多", "推荐"] {
-      let button = app.tabBars["native-root-navigation"].buttons[title]
+      let button = rootNavigation(app).buttons[title]
       XCTAssertTrue(button.isHittable)
       button.tap()
       XCTAssertTrue(button.isEnabled)
@@ -887,7 +1283,7 @@ final class NativeFrameworkTests: XCTestCase {
     for _ in 0..<3 {
       XCUIDevice.shared.press(.home)
       app.activate()
-      XCTAssertTrue(app.tabBars["native-root-navigation"].waitForExistence(timeout: 10))
+      XCTAssertTrue(rootNavigation(app).waitForExistence(timeout: 10))
     }
     let (body, _) = try await URLSession.shared.data(
       from: base.appendingPathComponent("__fixture/stats"))
@@ -924,7 +1320,7 @@ final class NativeFrameworkTests: XCTestCase {
     if address.buttons.firstMatch.exists { address.buttons.firstMatch.tap() }
     address.typeText(server + "\n")
     authenticateFixture(app, remember: false)
-    XCTAssertTrue(app.tabBars["native-root-navigation"].waitForExistence(timeout: 30))
+    XCTAssertTrue(rootNavigation(app).waitForExistence(timeout: 30))
     let initial = try await foregroundFixture(base)
     XCTAssertEqual(initial["value"] as? String, "保留输入")
     XCTAssertEqual(initial["scroll"] as? Int, 73)
@@ -951,7 +1347,7 @@ final class NativeFrameworkTests: XCTestCase {
       XCTAssertEqual(resumed["boot"] as? String, boot)
       XCTAssertEqual(resumed["value"] as? String, "保留输入")
       XCTAssertEqual(resumed["scroll"] as? Int, 73)
-      XCTAssertTrue(app.tabBars["native-root-navigation"].buttons["推荐"].isEnabled)
+      XCTAssertTrue(rootNavigation(app).buttons["推荐"].isEnabled)
     }
   }
 
@@ -982,7 +1378,7 @@ final class NativeFrameworkTests: XCTestCase {
     if address.buttons.firstMatch.exists { address.buttons.firstMatch.tap() }
     address.typeText(server + "\n")
     authenticateFixture(app, remember: false)
-    XCTAssertTrue(app.tabBars["native-root-navigation"].waitForExistence(timeout: 30))
+    XCTAssertTrue(rootNavigation(app).waitForExistence(timeout: 30))
     let initial = try await foregroundFixture(base)
     _ = try await foregroundFixture(base, control: "hold")
     app.coordinate(withNormalizedOffset: .init(dx: 0.95, dy: 0.005)).press(
@@ -1135,7 +1531,7 @@ final class NativeFrameworkTests: XCTestCase {
     XCTAssertFalse(app.buttons["使用网页登录"].exists)
     attachScreen("原生专用-登录", app: app)
     authenticateFixture(app, remember: false)
-    XCTAssertTrue(app.tabBars["native-root-navigation"].waitForExistence(timeout: 30))
+    XCTAssertTrue(rootNavigation(app).waitForExistence(timeout: 30))
     app.buttons["操作菜单"].tap()
     app.buttons["连接与显示"].tap()
     XCTAssertTrue(app.buttons["重新加载"].waitForExistence(timeout: 5))
@@ -1151,7 +1547,7 @@ final class NativeFrameworkTests: XCTestCase {
     attachScreen("原生专用-导航恢复", app: app)
     _ = try await prepareNativeOnlyFixture(mode: "healthy")
     app.buttons["重新打开"].tap()
-    XCTAssertTrue(app.tabBars["native-root-navigation"].waitForExistence(timeout: 30))
+    XCTAssertTrue(rootNavigation(app).waitForExistence(timeout: 30))
     XCTAssertFalse(app.otherElements["native-startup-screen"].exists)
   }
 
@@ -1160,12 +1556,12 @@ final class NativeFrameworkTests: XCTestCase {
     let server = try await prepareNativeOnlyFixture(mode: "healthy")
     let app = try launchLogin(server: server)
     authenticateFixture(app, remember: false)
-    XCTAssertTrue(app.tabBars["native-root-navigation"].waitForExistence(timeout: 30))
+    XCTAssertTrue(rootNavigation(app).waitForExistence(timeout: 30))
     _ = try await prepareNativeOnlyFixture(mode: "expired")
     // 在途请求可能已先收到401；只有原生表单尚未出现时才触发新的业务读取。
     let login = app.navigationBars["登录"]
     if !login.waitForExistence(timeout: 2) {
-      let more = app.tabBars["native-root-navigation"].buttons["更多"]
+      let more = rootNavigation(app).buttons["更多"]
       if more.exists && more.isHittable { more.tap() }
       let row = app.tables["more-menu"].cells.containing(.staticText, identifier: "电影订阅").firstMatch
       if row.waitForExistence(timeout: 2), row.isHittable { row.tap() }
@@ -1178,7 +1574,7 @@ final class NativeFrameworkTests: XCTestCase {
     XCTAssertEqual(app.state, .runningForeground)
     _ = try await prepareNativeOnlyFixture(mode: "healthy")
     authenticateFixture(app, remember: false)
-    XCTAssertTrue(app.tabBars["native-root-navigation"].waitForExistence(timeout: 30))
+    XCTAssertTrue(rootNavigation(app).waitForExistence(timeout: 30))
   }
 
   /// 历史网页偏好即便仍为真，也不能绕过原生认证恢复完整网页。
@@ -1186,7 +1582,7 @@ final class NativeFrameworkTests: XCTestCase {
     let server = try await prepareNativeOnlyFixture(mode: "healthy")
     let app = try launchLogin(server: server)
     authenticateFixture(app, remember: false)
-    XCTAssertTrue(app.tabBars["native-root-navigation"].waitForExistence(timeout: 30))
+    XCTAssertTrue(rootNavigation(app).waitForExistence(timeout: 30))
     let (data, _) = try await URLSession.shared.data(
       from: try XCTUnwrap(URL(string: server + "/__fixture/context")))
     let value = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -1213,7 +1609,7 @@ final class NativeFrameworkTests: XCTestCase {
     XCTAssertFalse(app.webViews.firstMatch.exists)
     _ = try await prepareNativeOnlyFixture(mode: "healthy")
     app.buttons["重新打开"].tap()
-    XCTAssertTrue(app.tabBars["native-root-navigation"].waitForExistence(timeout: 30))
+    XCTAssertTrue(rootNavigation(app).waitForExistence(timeout: 30))
   }
 
   /// 未初始化只给出浏览器准备说明和原生重新检查，不在 App 内打开网页初始化。
@@ -1823,13 +2219,13 @@ final class NativeFrameworkTests: XCTestCase {
   /// 普通重新加载继续使用当前路由与登录会话，不能把恢复操作变成完整网页模式。
   func testReloadRestoresNativeNavigation() throws {
     let app = try signIn()
-    app.tabBars["native-root-navigation"].buttons["推荐"].tap()
+    rootNavigation(app).buttons["推荐"].tap()
     XCTAssertTrue(app.navigationBars["推荐"].waitForExistence(timeout: 10))
     settlePage(app)
     app.buttons["操作菜单"].tap()
     app.buttons["连接与显示"].tap()
     app.buttons["重新加载"].tap()
-    XCTAssertTrue(app.tabBars["native-root-navigation"].waitForExistence(timeout: 35))
+    XCTAssertTrue(rootNavigation(app).waitForExistence(timeout: 35))
     XCTAssertTrue(app.navigationBars["推荐"].waitForExistence(timeout: 10))
     XCTAssertTrue(app.buttons["操作菜单"].isHittable)
     XCTAssertFalse(app.staticTexts["暂时无法打开 MoviePilot"].exists)
@@ -1852,7 +2248,7 @@ final class NativeFrameworkTests: XCTestCase {
     XCTAssertTrue(field.waitForExistence(timeout: 12))
     XCTAssertEqual(field.value as? String, "后台保留")
     app.buttons["native-panel-close"].tap()
-    XCTAssertTrue(app.tabBars["native-root-navigation"].exists)
+    XCTAssertTrue(rootNavigation(app).exists)
     attachScreen("恢复-后台返回保留原生面板状态", app: app)
   }
 
@@ -1862,7 +2258,7 @@ final class NativeFrameworkTests: XCTestCase {
       let fixture = URL(string: value), fixture.host == "127.0.0.1", fixture.scheme == "http"
     else { throw XCTSkip("进程回收验收需要专用模拟器及本机隔离夹具。") }
     let app = try signIn()
-    app.tabBars["native-root-navigation"].buttons["推荐"].tap()
+    rootNavigation(app).buttons["推荐"].tap()
     XCTAssertTrue(app.navigationBars["推荐"].waitForExistence(timeout: 10))
     settlePage(app)
     XCUIDevice.shared.press(.home)
@@ -1874,11 +2270,138 @@ final class NativeFrameworkTests: XCTestCase {
     let result = try JSONSerialization.jsonObject(with: data) as? [String: Int]
     XCTAssertEqual(result?["terminated"], 1, "夹具必须只终止专用模拟器的一个内容进程")
     app.activate()
-    XCTAssertTrue(app.tabBars["native-root-navigation"].waitForExistence(timeout: 35))
+    XCTAssertTrue(rootNavigation(app).waitForExistence(timeout: 35))
     XCTAssertTrue(app.navigationBars["推荐"].waitForExistence(timeout: 10))
     XCTAssertTrue(app.buttons["操作菜单"].isHittable)
     XCTAssertFalse(app.staticTexts["暂时无法打开 MoviePilot"].exists)
     attachScreen("恢复-后台进程回收后恢复原生框架", app: app)
+  }
+
+  /// 渠道失败先显示配置原因，后台恢复后无需重新登录即可进入系统授权。
+  func testNativeNotificationSetupRecoversWithoutLogin() async throws {
+    guard let raw = ProcessInfo.processInfo.environment["MOVIEPILOT_E2E_NOTIFICATION_SETUP"],
+      let fixture = URL(string: raw), fixture.scheme == "http", fixture.host == "127.0.0.1"
+    else { throw XCTSkip("通知配置回归需要专用回环服务与全新模拟器权限状态。") }
+    try await setNotificationSetup("disabled", fixture: fixture)
+    let app = try signIn(captureScreens: false, remember: false)
+    settlePage(app)
+    dismissUpdateReminderIfVisible(app)
+    app.buttons["操作菜单"].tap()
+    app.buttons["连接与显示"].tap()
+    app.buttons["通知"].firstMatch.tap()
+    let settings = app.tables["notification-settings"]
+    XCTAssertTrue(settings.waitForExistence(timeout: 10))
+    let button = settings.cells["notification-enable-native"]
+    settings.swipeUp()
+    let ready = XCTNSPredicateExpectation(
+      predicate: NSPredicate(format: "isEnabled == true"), object: button)
+    XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 15), .completed)
+    let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+    button.tap()
+    let message = app.alerts["通知"]
+    XCTAssertTrue(message.waitForExistence(timeout: 10))
+    XCTAssertTrue(
+      message.staticTexts.matching(NSPredicate(format: "label CONTAINS 'AppPush'")).firstMatch
+        .exists)
+    XCTAssertFalse(message.staticTexts["请先登录 MoviePilot。"].exists)
+    XCTAssertFalse(springboard.alerts.firstMatch.exists, "渠道不可用时不能先申请系统权限")
+    attachScreen("通知-未启用渠道显示配置步骤", app: app)
+    message.buttons["好"].tap()
+
+    try await setNotificationSetup("missing-owner", fixture: fixture)
+    button.tap()
+    XCTAssertTrue(message.waitForExistence(timeout: 10))
+    XCTAssertTrue(message.staticTexts["通知服务未返回账号身份，请更新 MoviePilot 后端后重试。"].exists)
+    XCTAssertFalse(springboard.alerts.firstMatch.exists)
+    message.buttons["好"].tap()
+
+    try await setNotificationSetup("ready", fixture: fixture)
+    button.tap()
+    let permission = springboard.alerts.firstMatch
+    XCTAssertTrue(permission.waitForExistence(timeout: 10), "恢复渠道后应重新取得身份并进入系统授权")
+    let deny = permission.buttons.matching(
+      NSPredicate(format: "label IN %@", ["不允许", "Don’t Allow", "Don't Allow"])
+    ).firstMatch
+    XCTAssertTrue(deny.exists)
+    deny.tap()
+    XCTAssertTrue(message.waitForExistence(timeout: 10))
+    XCTAssertTrue(message.staticTexts["系统通知未开启，可前往设置允许通知。"].exists)
+    XCTAssertFalse(message.staticTexts["请先登录 MoviePilot。"].exists)
+    attachScreen("通知-配置恢复后完成系统权限流程", app: app)
+    let (data, _) = try await URLSession.shared.data(
+      from: fixture.appendingPathComponent("__notification/state"))
+    let state = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    let actions = try XCTUnwrap(state["actions"] as? [String])
+    XCTAssertGreaterThanOrEqual(actions.count, 4)
+    XCTAssertTrue(actions.allSatisfy { $0 == "status" }, "拒绝授权不能注册设备或发送消息")
+  }
+
+  /// 控制状态仅发往显式回环夹具，不修改真实 MoviePilot 通知配置。
+  private func setNotificationSetup(_ mode: String, fixture: URL) async throws {
+    var request = URLRequest(url: fixture.appendingPathComponent("__notification/state"))
+    request.httpMethod = "POST"
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try JSONSerialization.data(withJSONObject: ["mode": mode])
+    let (_, response) = try await URLSession.shared.data(for: request)
+    XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+  }
+
+  /// 点击系统投递的通知唤醒后台 App，覆盖有效、无效和异账号载荷的系统完成回调。
+  func testBackgroundNotificationTapKeepsAppAlive() async throws {
+    guard let raw = ProcessInfo.processInfo.environment["MOVIEPILOT_E2E_NOTIFICATION_TAP"],
+      let fixture = URL(string: raw), fixture.scheme == "http", fixture.host == "127.0.0.1"
+    else { throw XCTSkip("通知点击回归需要显式指定模拟器的本机隔离服务。") }
+    try await setNotificationSetup("ready", fixture: fixture)
+    let app = try signIn(captureScreens: false, remember: false)
+    settlePage(app)
+    dismissUpdateReminderIfVisible(app)
+    app.buttons["操作菜单"].tap()
+    app.buttons["连接与显示"].tap()
+    app.buttons["通知"].firstMatch.tap()
+    let settings = app.tables["notification-settings"]
+    XCTAssertTrue(settings.waitForExistence(timeout: 10))
+    settings.swipeUp()
+    let enable = settings.cells["notification-enable-native"]
+    let ready = XCTNSPredicateExpectation(
+      predicate: NSPredicate(format: "isEnabled == true"), object: enable)
+    XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 15), .completed)
+    enable.tap()
+    let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+    let permission = springboard.alerts.firstMatch
+    if permission.waitForExistence(timeout: 5) {
+      permission.buttons.matching(NSPredicate(format: "label IN %@", ["允许", "Allow"]))
+        .firstMatch.tap()
+    }
+    let confirmation = app.alerts["通知"]
+    if confirmation.waitForExistence(timeout: 8) { confirmation.buttons["好"].tap() }
+    app.buttons["完成"].tap()
+    for kind in ["valid", "invalid", "other"] {
+      XCUIDevice.shared.press(.home)
+      XCTAssertTrue(app.wait(for: .runningBackground, timeout: 5))
+      var request = URLRequest(url: fixture.appendingPathComponent("__notification/push"))
+      request.httpMethod = "POST"
+      request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+      request.httpBody = try JSONSerialization.data(withJSONObject: ["kind": kind])
+      let (_, response) = try await URLSession.shared.data(for: request)
+      XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+      let notification = springboard.descendants(matching: .any)
+        .matching(NSPredicate(format: "label CONTAINS %@", "MoviePilot 通知点击回归")).firstMatch
+      XCTAssertTrue(notification.waitForExistence(timeout: 10), springboard.debugDescription)
+      notification.tap()
+      XCTAssertTrue(app.wait(for: .runningForeground, timeout: 10), "点击通知必须恢复原 App 进程")
+      if kind == "valid" {
+        XCTAssertTrue(app.tables["native-quick-panel"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.navigationBars["通知中心"].exists)
+        attachScreen("通知-后台点击恢复通知中心", app: app, dismissUpdateReminder: false)
+        app.buttons["native-panel-close"].tap()
+      } else if kind == "other" {
+        let alert = app.alerts["通知"]
+        XCTAssertTrue(alert.waitForExistence(timeout: 10))
+        alert.buttons["好"].tap()
+      }
+      XCTAssertTrue(rootNavigation(app).exists)
+      XCTAssertEqual(app.state, .runningForeground)
+    }
   }
 
   /// 隔离中转夹具验证原生设置、真实绑定码与主屏幕通知链接，不访问外部推送服务。
@@ -1989,7 +2512,7 @@ final class NativeFrameworkTests: XCTestCase {
     XCTAssertFalse(app.webViews.firstMatch.exists)
     XCTAssertFalse(app.navigationBars.firstMatch.exists)
     _ = try await prepareNativeOnlyFixture(mode: "healthy")
-    XCTAssertTrue(app.tabBars["native-root-navigation"].waitForExistence(timeout: 30))
+    XCTAssertTrue(rootNavigation(app).waitForExistence(timeout: 30))
     XCTAssertFalse(startup.exists)
   }
 
@@ -2022,11 +2545,13 @@ final class NativeFrameworkTests: XCTestCase {
     }
     let app = try signIn()
     XCTAssertLessThan(app.frame.width, app.frame.height, "截图验收使用 iPhone Pro 竖屏")
-    let more = app.tabBars["native-root-navigation"].buttons["更多"]
+    let more = rootNavigation(app).buttons["更多"]
     settlePage(app)
     attachScreen("框架-单行原生导航", app: app)
     XCTAssertTrue(more.exists, "iPhone Pro 主导航应显示在底部")
-    XCTAssertEqual(app.tabBars.count, 1, "底部只保留一个主导航组")
+    XCTAssertEqual(
+      app.descendants(matching: .any).matching(identifier: "native-root-navigation").count, 1,
+      "底部只保留一个主导航组")
     XCTAssertGreaterThan(more.frame.minY, app.frame.height / 2)
     for title in ["仪表盘", "推荐", "探索"] {
       let entry = app.buttons[title].firstMatch
@@ -2134,14 +2659,14 @@ final class NativeFrameworkTests: XCTestCase {
     app.buttons["新会话"].tap()
     XCTAssertTrue(app.webViews.staticTexts["今天想处理什么？"].waitForExistence(timeout: 8))
     app.buttons["native-sheet-close"].tap()
-    XCTAssertTrue(app.tabBars["native-root-navigation"].waitForExistence(timeout: 8))
+    XCTAssertTrue(rootNavigation(app).waitForExistence(timeout: 8))
     try await setUIScenario("default")
   }
 
   /// 页面标题栏筛选也使用原生列表，选择继续更新已有 Vue 筛选条件。
   func testNativePageHeaderActions() throws {
     let app = try signIn()
-    app.tabBars["native-root-navigation"].buttons["更多"].tap()
+    rootNavigation(app).buttons["更多"].tap()
     let menu = app.tables["more-menu"]
     XCTAssertTrue(menu.waitForExistence(timeout: 10))
     moreItem("站点管理", app: app).tap()
@@ -2162,7 +2687,7 @@ final class NativeFrameworkTests: XCTestCase {
     let filter = app.tables["native-quick-panel"]
     XCTAssertTrue(filter.waitForExistence(timeout: 10))
     XCTAssertTrue(filter.cells["native-panel-item-connected"].exists)
-    XCTAssertTrue(app.tabBars["native-root-navigation"].exists, "筛选菜单保留底部导航")
+    XCTAssertTrue(rootNavigation(app).exists, "筛选菜单保留底部导航")
     attachScreen("交互-原生站点筛选菜单", app: app)
     filter.cells["native-panel-item-connected"].tap()
     XCTAssertTrue(app.buttons["操作菜单"].waitForExistence(timeout: 8))
@@ -2211,7 +2736,7 @@ final class NativeFrameworkTests: XCTestCase {
   /// 用同一真实页面对比 iOS 26/27 的明暗导航、系统菜单、主题弹窗和底部切换。
   func testIOSNavigationCompatibility() throws {
     let app = try signIn(captureScreens: false, remember: false)
-    let roots = app.tabBars["native-root-navigation"]
+    let roots = rootNavigation(app)
     settlePage(app)
     let geometry = XCTAttachment(
       string:
@@ -2316,7 +2841,7 @@ final class NativeFrameworkTests: XCTestCase {
     XCTAssertEqual(field.value as? String, "示例")
     attachScreen("交互-原生工作流分享搜索", app: app)
     app.buttons["native-panel-close"].tap()
-    XCTAssertTrue(app.tabBars["native-root-navigation"].exists)
+    XCTAssertTrue(rootNavigation(app).exists)
   }
 
   /// 真实插件搜索在横竖屏和键盘状态下保留安全边距，关闭后文件详情按钮仍可点击。
@@ -2374,7 +2899,7 @@ final class NativeFrameworkTests: XCTestCase {
   /// 目录滚动打开文件页，文件刷新仍通过原生菜单触发同一 HTML 列表更新。
   func testMoreDirectoryAndFileActions() throws {
     let app = try signIn()
-    app.tabBars["native-root-navigation"].buttons["更多"].tap()
+    rootNavigation(app).buttons["更多"].tap()
     let menu = app.tables["more-menu"]
     XCTAssertTrue(menu.waitForExistence(timeout: 10))
     XCTAssertFalse(app.descendants(matching: .any)["more-menu-search"].exists)
@@ -2405,7 +2930,7 @@ final class NativeFrameworkTests: XCTestCase {
       throw XCTSkip("截图只在显式开启的私有验收运行中采集。")
     }
     let app = try signIn()
-    app.tabBars["native-root-navigation"].buttons["更多"].tap()
+    rootNavigation(app).buttons["更多"].tap()
     let menu = app.tables["more-menu"]
     XCTAssertTrue(menu.waitForExistence(timeout: 10))
     moreItem("设定", app: app).tap()
@@ -2428,7 +2953,7 @@ final class NativeFrameworkTests: XCTestCase {
   func testNativeHTMLPresentation() throws {
     let app = try signIn()
     settlePage(app)
-    app.tabBars["native-root-navigation"].buttons["更多"].tap()
+    rootNavigation(app).buttons["更多"].tap()
     let menu = app.tables["more-menu"]
     XCTAssertTrue(menu.waitForExistence(timeout: 10))
     assertBottomLayout(app)
@@ -2466,7 +2991,7 @@ final class NativeFrameworkTests: XCTestCase {
     attachScreen("交互-主题明暗与主色半屏", app: app)
     attachScreen("交互-主题定制安全区", app: app)
     dismissOverlays(app)
-    app.tabBars["native-root-navigation"].buttons["更多"].tap()
+    rootNavigation(app).buttons["更多"].tap()
     XCTAssertTrue(menu.waitForExistence(timeout: 10), "从业务页点击更多必须立即回到原生目录")
     XCTAssertFalse(app.buttons["返回"].exists, "回到目录后不能残留业务返回栈")
   }
@@ -2514,7 +3039,7 @@ final class NativeFrameworkTests: XCTestCase {
     try await setSystemAppearance("light")
     let app = try signIn(captureScreens: false, remember: false)
     defer { app.terminate() }
-    app.tabBars["native-root-navigation"].buttons["仪表盘"].tap()
+    rootNavigation(app).buttons["仪表盘"].tap()
     // 真实打开再关闭主题 Sheet，覆盖旧实现将 underPageBackgroundColor 固定为浅色的路径。
     selectTheme("跟随系统", app: app)
     assertTopEdgeAppearance(app, dark: false, name: "顶栏渐变-初始浅色")
@@ -2526,7 +3051,7 @@ final class NativeFrameworkTests: XCTestCase {
     try await setSystemAppearance("dark")
     app.activate()
     assertTopEdgeAppearance(app, dark: true, name: "顶栏渐变-后台切深色后恢复")
-    app.tabBars["native-root-navigation"].buttons["更多"].tap()
+    rootNavigation(app).buttons["更多"].tap()
     try await setSystemAppearance("light")
     assertTopEdgeAppearance(app, dark: false, name: "顶栏渐变-原生更多跟随浅色")
     // 手动浅色仍以网页偏好为准，系统切深色不能覆盖用户选择。
@@ -2573,7 +3098,7 @@ final class NativeFrameworkTests: XCTestCase {
   func testNativeMaterialsInLightAndDarkThemes() async throws {
     let app = try signIn()
     settlePage(app)
-    let roots = app.tabBars["native-root-navigation"]
+    let roots = rootNavigation(app)
     roots.buttons["推荐"].tap()
     let categories = app.buttons["推荐，页内分类"]
     XCTAssertTrue(categories.waitForExistence(timeout: 10))
@@ -2612,7 +3137,7 @@ final class NativeFrameworkTests: XCTestCase {
   /// 换主题、滚动复用和重新进入目录后保留统一图标，文件整理使用明确的文件夹符号。
   func testMoreMenuSymbolsAfterThemeChanges() async throws {
     let app = try signIn()
-    let roots = app.tabBars["native-root-navigation"]
+    let roots = rootNavigation(app)
     for (theme, appearance) in [("浅色", "light"), ("深色", "dark")] {
       try await setSystemAppearance(appearance)
       settlePage(app)
@@ -2647,7 +3172,7 @@ final class NativeFrameworkTests: XCTestCase {
     XCTAssertTrue(menu.waitForExistence(timeout: 15))
     for (theme, appearance) in [("深色", "dark"), ("浅色", "light")] {
       try await setSystemAppearance(appearance)
-      app.tabBars["native-root-navigation"].buttons["更多"].tap()
+      rootNavigation(app).buttons["更多"].tap()
       settlePage(app)
       XCTAssertTrue(menu.cells.containing(.staticText, identifier: "电影订阅").firstMatch.exists)
       attachScreen("更多-\(theme)系统中性灰分组", app: app)
@@ -2746,7 +3271,7 @@ final class NativeFrameworkTests: XCTestCase {
       attachScreen("交互-社区勋章关闭位置", app: app)
       close.tap()
       XCTAssertTrue(
-        app.tabBars["native-root-navigation"].buttons["更多"].waitForExistence(timeout: 8))
+        rootNavigation(app).buttons["更多"].waitForExistence(timeout: 8))
     } else {
       dismissOverlays(app)
     }
@@ -2912,7 +3437,7 @@ final class NativeFrameworkTests: XCTestCase {
     attachScreen("交互-系统确认框完整正文", app: app)
     alert.buttons["取消"].tap()
     XCTAssertTrue(alert.waitForNonExistence(timeout: 8))
-    XCTAssertTrue(app.tabBars["native-root-navigation"].exists)
+    XCTAssertTrue(rootNavigation(app).exists)
     XCTAssertTrue(app.buttons["操作菜单"].isEnabled)
     attachScreen("交互-系统确认取消返回主页面", app: app)
   }
@@ -3136,7 +3661,7 @@ final class NativeFrameworkTests: XCTestCase {
   /// 推荐榜单返回与更多目录重复点击都以已确认 Router 位置为准。
   func testRankingBackAndMoreRoot() throws {
     let app = try signIn()
-    let roots = app.tabBars["native-root-navigation"]
+    let roots = rootNavigation(app)
     roots.buttons["推荐"].tap()
     XCTAssertTrue(app.navigationBars["推荐"].waitForExistence(timeout: 10))
     settlePage(app)
@@ -3160,7 +3685,7 @@ final class NativeFrameworkTests: XCTestCase {
   /// 榜单与更多往返后逐项真实点击底栏，覆盖同项连点与恢复入口最近业务页面的命中。
   func testRankingKeepsBottomNavigationResponsive() throws {
     let app = try signIn()
-    let roots = app.tabBars["native-root-navigation"]
+    let roots = rootNavigation(app)
     for cycle in 1...4 {
       roots.buttons["推荐"].tap()
       if app.buttons["返回"].exists { app.buttons["返回"].tap() }
@@ -3192,7 +3717,7 @@ final class NativeFrameworkTests: XCTestCase {
   /// 目录没有搜索表头，下拉及横竖屏切换后也不会侵入导航标题。
   func testMoreDirectoryWithoutSearch() throws {
     let app = try signIn(captureScreens: false, remember: false)
-    let more = app.tabBars["native-root-navigation"].buttons["更多"]
+    let more = rootNavigation(app).buttons["更多"]
     more.tap()
     XCTAssertTrue(app.tables["more-menu"].waitForExistence(timeout: 10))
     let field = app.descendants(matching: .any)["more-menu-search"]
@@ -3212,11 +3737,14 @@ final class NativeFrameworkTests: XCTestCase {
 
   /// 动态按钮出现与消失只平移整组导航，不重新压缩主按钮与选中反馈。
   func testBottomNavigationKeepsItemGeometry() throws {
+    guard ProcessInfo.processInfo.environment["SIMULATOR_MODEL_IDENTIFIER"] != "iPhone19,4" else {
+      throw XCTSkip("Duo 使用系统操作栏，不执行普通底栏的水平几何断言。")
+    }
     let app = try signIn()
-    app.tabBars["native-root-navigation"].buttons["更多"].tap()
+    rootNavigation(app).buttons["更多"].tap()
     XCTAssertTrue(app.tables["more-menu"].waitForExistence(timeout: 10))
     settlePage(app)
-    let bar = app.tabBars["native-root-navigation"]
+    let bar = rootNavigation(app)
     let initial = bar.buttons.allElementsBoundByIndex.map(\.frame)
     let width = bar.frame.width
     XCTAssertFalse(app.buttons["native-bottom-action"].exists)
@@ -3257,7 +3785,7 @@ final class NativeFrameworkTests: XCTestCase {
   /// 根页不响应侧滑，详情短滑不返回，完成侧滑只消费一次原路由返回。
   func testEdgeSwipeBackAndSheetDismissal() throws {
     let app = try signIn()
-    app.tabBars["native-root-navigation"].buttons["推荐"].tap()
+    rootNavigation(app).buttons["推荐"].tap()
     XCTAssertTrue(app.navigationBars["推荐"].waitForExistence(timeout: 10))
     settlePage(app)
     let edge = app.coordinate(withNormalizedOffset: CGVector(dx: 0.005, dy: 0.55))
@@ -3295,7 +3823,7 @@ final class NativeFrameworkTests: XCTestCase {
   /// 慢拖覆盖正常预览和后台清空预览；取消不改页面，完成仍返回真实目标。
   func testInteractiveBackCardCancellationAndCompletion() throws {
     let app = try signIn(captureScreens: false)
-    app.tabBars["native-root-navigation"].buttons["推荐"].tap()
+    rootNavigation(app).buttons["推荐"].tap()
     XCTAssertTrue(app.navigationBars["推荐"].waitForExistence(timeout: 10))
     settlePage(app)
     for cycle in 0..<2 {
@@ -3383,7 +3911,7 @@ final class NativeFrameworkTests: XCTestCase {
     else { throw XCTSkip("工具弹层验收需要独立本机合成夹具。") }
     let app = try launchLogin(server: server)
     authenticateFixture(app, remember: false)
-    XCTAssertTrue(app.tabBars["native-root-navigation"].waitForExistence(timeout: 30))
+    XCTAssertTrue(rootNavigation(app).waitForExistence(timeout: 30))
     for mode in ["dark", "light"] {
       try await setSystemAppearance(mode)
       for tool in ["nameTest", "ruleTest", "words"] {
@@ -3434,7 +3962,7 @@ final class NativeFrameworkTests: XCTestCase {
           attachScreen("交互-\(mode)\(tool)统一结果布局", app: app)
         }
         app.buttons["native-sheet-close"].tap()
-        XCTAssertTrue(app.tabBars["native-root-navigation"].waitForExistence(timeout: 10))
+        XCTAssertTrue(rootNavigation(app).waitForExistence(timeout: 10))
       }
     }
     try await setSystemAppearance("dark")
@@ -3447,7 +3975,7 @@ final class NativeFrameworkTests: XCTestCase {
     else { throw XCTSkip("工具布局回归验收需要独立本机合成夹具。") }
     let app = try launchLogin(server: server)
     authenticateFixture(app, remember: false)
-    XCTAssertTrue(app.tabBars["native-root-navigation"].waitForExistence(timeout: 30))
+    XCTAssertTrue(rootNavigation(app).waitForExistence(timeout: 30))
     /// 仅通过注册的原生捷径动作打开原 Vue 内容，不增加测试专用页面入口。
     func openShortcut(_ name: String) {
       app.buttons["操作菜单"].tap()
@@ -3483,7 +4011,7 @@ final class NativeFrameworkTests: XCTestCase {
       XCTAssertLessThanOrEqual(save.frame.maxX, web.frame.maxX)
       if mode == "light" { attachScreen("修复-词表浅色集数规则", app: app) }
       app.buttons["native-sheet-close"].tap()
-      XCTAssertTrue(app.tabBars["native-root-navigation"].waitForExistence(timeout: 10))
+      XCTAssertTrue(rootNavigation(app).waitForExistence(timeout: 10))
       openShortcut("logging")
       XCTAssertTrue(app.staticTexts["实时日志"].firstMatch.waitForExistence(timeout: 8))
       let menu = app.buttons["native-sheet-menu"]
@@ -3495,7 +4023,7 @@ final class NativeFrameworkTests: XCTestCase {
       if mode == "dark" { attachScreen("修复-实时日志原生操作菜单", app: app) }
       app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.88)).tap()
       app.buttons["native-sheet-close"].tap()
-      XCTAssertTrue(app.tabBars["native-root-navigation"].waitForExistence(timeout: 10))
+      XCTAssertTrue(rootNavigation(app).waitForExistence(timeout: 10))
     }
     try await setSystemAppearance("dark")
   }
@@ -3513,7 +4041,7 @@ final class NativeFrameworkTests: XCTestCase {
       return try XCTUnwrap(metrics?["documentLoads"])
     }
     let app = try signIn()
-    app.tabBars["native-root-navigation"].buttons["仪表盘"].tap()
+    rootNavigation(app).buttons["仪表盘"].tap()
     settlePage(app)
     app.webViews.firstMatch.swipeUp()
     settlePage(app)
@@ -3636,7 +4164,7 @@ final class NativeFrameworkTests: XCTestCase {
     XCTAssertGreaterThan(close.frame.minX, app.frame.width - 80)
     attachScreen("交互-社区勋章关闭位置", app: app)
     close.tap()
-    XCTAssertTrue(app.tabBars["native-root-navigation"].buttons["更多"].waitForExistence(timeout: 8))
+    XCTAssertTrue(rootNavigation(app).buttons["更多"].waitForExistence(timeout: 8))
   }
 
   /// 采集不含凭据的竖屏账户界面与软键盘，由运行配置选择系统明暗外观。
@@ -3731,7 +4259,7 @@ final class NativeFrameworkTests: XCTestCase {
     attachScreen("卡片-长按动作交接文件统计", app: app)
     app.buttons["native-sheet-close"].tap()
     XCTAssertTrue(app.navigationBars["电视剧订阅"].waitForExistence(timeout: 8))
-    app.tabBars["native-root-navigation"].buttons["仪表盘"].tap()
+    rootNavigation(app).buttons["仪表盘"].tap()
     XCTAssertTrue(app.navigationBars["仪表盘"].waitForExistence(timeout: 8))
     XCTAssertFalse(app.buttons["文件统计"].exists)
   }
@@ -4202,7 +4730,7 @@ final class NativeFrameworkTests: XCTestCase {
       {
         let web = app.webViews.firstMatch
         let top = app.navigationBars.firstMatch.frame.maxY - web.frame.minY + 4
-        let bottom = app.tabBars["native-root-navigation"].frame.minY - web.frame.minY - 4
+        let bottom = rootNavigation(app).frame.minY - web.frame.minY - 4
         if y < top {
           web.swipeDown()
         } else if y + height > bottom {
@@ -4249,7 +4777,7 @@ final class NativeFrameworkTests: XCTestCase {
       {
         let web = app.webViews.firstMatch
         let top = app.navigationBars.firstMatch.frame.maxY - web.frame.minY + 4
-        let bottom = app.tabBars["native-root-navigation"].frame.minY - web.frame.minY - 4
+        let bottom = rootNavigation(app).frame.minY - web.frame.minY - 4
         let visibleTop = max(top, y)
         let visibleBottom = min(bottom, y + height)
         guard visibleBottom - visibleTop > 4 else {
@@ -4286,7 +4814,7 @@ final class NativeFrameworkTests: XCTestCase {
     }
     let app = try launchCardMenuApp(server: base.absoluteString)
     XCTAssertTrue(
-      app.tabBars["native-root-navigation"].waitForExistence(timeout: 45), app.debugDescription)
+      rootNavigation(app).waitForExistence(timeout: 45), app.debugDescription)
     /// 等待当前可见卡片及其原始搜索按钮，坐标使用真实 DOM 与当前 WebView frame。
     func point(_ key: String) async throws -> XCUICoordinate {
       for _ in 0..<100 {
@@ -4315,14 +4843,15 @@ final class NativeFrameworkTests: XCTestCase {
       _ = try await URLSession.shared.data(for: request)
       let card = try await point("card")
       XCTAssertTrue(
-        app.tabBars["native-root-navigation"].buttons[titles[index % titles.count]].isSelected)
+        rootNavigation(app).buttons[titles[index % titles.count]].isSelected)
       if index.isMultiple(of: 2) {
         card.tap()
         try await point("search").tap()
       } else {
         card.press(forDuration: 1)
-        XCTAssertTrue(app.buttons["搜索"].waitForExistence(timeout: 8), app.debugDescription)
-        app.buttons["搜索"].tap()
+        let search = app.collectionViews.buttons["搜索"].firstMatch
+        XCTAssertTrue(search.waitForExistence(timeout: 8), app.debugDescription)
+        search.tap()
       }
       let sheet = app.otherElements["native-web-sheet"]
       XCTAssertTrue(sheet.waitForExistence(timeout: 10), app.debugDescription)
@@ -4337,7 +4866,7 @@ final class NativeFrameworkTests: XCTestCase {
       let page = try XCTUnwrap(current["page"] as? [String: Any])
       XCTAssertEqual(page["hash"] as? String, "#/resource")
       XCTAssertEqual(page["sheet"] as? Bool, false)
-      XCTAssertTrue(app.tabBars["native-root-navigation"].buttons["更多"].isSelected)
+      XCTAssertTrue(rootNavigation(app).buttons["更多"].isSelected)
       XCTAssertGreaterThanOrEqual(current["delayed"] as? Int ?? 0, max(0, index - 5))
     }
     attachScreen("媒体卡片搜索-连续导航归还", app: app)
@@ -4352,7 +4881,7 @@ final class NativeFrameworkTests: XCTestCase {
     let account = app.textFields["用户名"]
     let ready = XCTNSPredicateExpectation(
       predicate: NSPredicate { _, _ in
-        account.exists || app.tabBars["native-root-navigation"].exists
+        account.exists || self.rootNavigation(app).exists
       }, object: nil)
     XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 30), .completed)
     if account.exists { authenticateFixture(app, remember: false) }
@@ -4378,7 +4907,7 @@ final class NativeFrameworkTests: XCTestCase {
       {
         let web = app.webViews.firstMatch
         let top = app.navigationBars.firstMatch.frame.maxY - web.frame.minY + 8
-        let bottom = app.tabBars["native-root-navigation"].frame.minY - web.frame.minY - 8
+        let bottom = rootNavigation(app).frame.minY - web.frame.minY - 8
         for rect in rectangles {
           guard let x = rect["x"], let y = rect["y"], let width = rect["width"],
             let height = rect["height"]
@@ -4403,7 +4932,7 @@ final class NativeFrameworkTests: XCTestCase {
     return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
   }
 
-  /// 公共登录前置只读取私有运行参数，截图不包含账号输入或密码。
+  /// 公共登录前置允许恢复同一实例的已有会话，私有登录参数不进入截图或持久测试配置。
   private func signIn(captureScreens: Bool = true, remember: Bool = true) throws -> XCUIApplication
   {
     let environment = ProcessInfo.processInfo.environment
@@ -4411,20 +4940,34 @@ final class NativeFrameworkTests: XCTestCase {
       let password = environment["MOVIEPILOT_E2E_PASSWORD"],
       !username.isEmpty, !password.isEmpty
     else { throw XCTSkip("需要通过私有测试运行配置指定实例和账号。") }
-    let app = try launchLogin(captureScreens: captureScreens)
-    if !remember { app.switches["保持登录"].tap() }
+    guard let server = environment["MOVIEPILOT_E2E_SERVER"] else {
+      throw XCTSkip("需要指定私有验收实例。")
+    }
+    let app = launchConnection(server: server, captureScreens: captureScreens)
     let account = app.textFields["用户名"]
-    account.tap()
-    if captureScreens { attachScreen("框架-登录键盘", app: app) }
-    account.typeText(username)
-    app.secureTextFields["密码"].tap()
-    app.secureTextFields["密码"].typeText(password + "\n")
+    let entry = XCTNSPredicateExpectation(
+      predicate: NSPredicate { _, _ in
+        account.exists || app.buttons["更多"].exists
+      }, object: nil)
+    XCTAssertEqual(XCTWaiter.wait(for: [entry], timeout: 45), .completed)
+    if account.exists {
+      if !remember { app.switches["保持登录"].tap() }
+      account.tap()
+      if captureScreens { attachScreen("框架-登录键盘", app: app) }
+      account.typeText(username)
+      app.secureTextFields["密码"].tap()
+      app.secureTextFields["密码"].typeText(password + "\n")
+    }
     // 未签名的模拟器可能拒绝 Keychain；明确关闭已告知的降级提示再验收页面交接。
     let outcome = app.buttons.matching(NSPredicate(format: "label IN %@", ["更多", "好"])).firstMatch
     XCTAssertTrue(outcome.waitForExistence(timeout: 45))
     if app.alerts["已登录"].exists { app.alerts["已登录"].buttons["好"].tap() }
     XCTAssertTrue(app.buttons["更多"].waitForExistence(timeout: 45), "等待网页确认原生导航接管")
-    XCTAssertFalse(app.otherElements["native-startup-screen"].exists, "资源与导航完成后启动页必须消失")
+    let startup = app.otherElements["native-startup-screen"]
+    if startup.exists {
+      XCTAssertTrue(
+        startup.waitForNonExistence(timeout: 20), "资源与导航完成后启动页必须消失")
+    }
     return app
   }
 
@@ -4553,8 +5096,8 @@ final class NativeFrameworkTests: XCTestCase {
         app.buttons["native-sheet-close"].tap()
       } else if app.buttons["native-panel-close"].exists {
         app.buttons["native-panel-close"].tap()
-      } else if app.tabBars["native-root-navigation"].buttons["更多"].exists
-        && app.tabBars["native-root-navigation"].buttons["更多"].isEnabled
+      } else if rootNavigation(app).buttons["更多"].exists
+        && rootNavigation(app).buttons["更多"].isEnabled
       {
         return
       } else {
@@ -4562,37 +5105,111 @@ final class NativeFrameworkTests: XCTestCase {
       }
       let closed = XCTNSPredicateExpectation(
         predicate: NSPredicate(format: "exists == true AND enabled == true"),
-        object: app.tabBars["native-root-navigation"].buttons["更多"])
+        object: rootNavigation(app).buttons["更多"])
       if XCTWaiter.wait(for: [closed], timeout: 3) == .completed { return }
     }
     XCTAssertTrue(
-      app.tabBars["native-root-navigation"].buttons["更多"].exists
-        && app.tabBars["native-root-navigation"].buttons["更多"].isEnabled,
+      rootNavigation(app).buttons["更多"].exists
+        && rootNavigation(app).buttons["更多"].isEnabled,
       "原生返回应交由既有 HTML 弹层关闭逻辑处理")
+  }
+
+  /// 收起实际位于活动窗口内的键盘，忽略 Duo 非活动显示屏保留的辅助功能键盘节点。
+  private func dismissKeyboardIfVisible(_ app: XCUIApplication) {
+    let keyboard = app.keyboards.firstMatch
+    guard keyboard.exists else { return }
+    let windowFrame = app.windows.firstMatch.frame
+    guard keyboard.frame.intersects(windowFrame) else { return }
+    let searchButton = keyboard.buttons["Search"].firstMatch
+    let localizedSearchButton = keyboard.buttons["搜索"].firstMatch
+    if searchButton.exists && searchButton.isHittable {
+      searchButton.tap()
+    } else if localizedSearchButton.exists && localizedSearchButton.isHittable {
+      localizedSearchButton.tap()
+    } else {
+      keyboard.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.92)).tap()
+    }
+    let hidden = XCTNSPredicateExpectation(
+      predicate: NSPredicate { _, _ in
+        !keyboard.exists || !keyboard.frame.intersects(windowFrame)
+      }, object: nil)
+    XCTAssertEqual(XCTWaiter.wait(for: [hidden], timeout: 5), .completed, "底部导航前必须收起系统键盘")
+  }
+
+  /// 系统 Tab Bar 与原生胶囊按稳定导航标识查询，避免把 UIKit 控件类型当成布局验收条件。
+  private func rootNavigation(_ app: XCUIApplication) -> XCUIElement {
+    app.descendants(matching: .any)["native-root-navigation"]
   }
 
   /// 主入口与动态动作必须处于同一行，两组之间留白，不能叠成上下两层。
   private func assertBottomLayout(_ app: XCUIApplication) {
-    let roots = app.tabBars["native-root-navigation"].buttons.allElementsBoundByIndex
+    if ProcessInfo.processInfo.environment["SIMULATOR_MODEL_IDENTIFIER"] == "iPhone19,4" {
+      assertSystemOperationBarLayout(app)
+      return
+    }
+    let roots = rootNavigation(app).buttons.allElementsBoundByIndex
     XCTAssertEqual(roots.count, 4)
     XCTAssertEqual(roots.last?.label, "更多", "主导航最后一项保持为更多菜单")
-    let more = app.tabBars["native-root-navigation"].buttons["更多"]
+    let more = rootNavigation(app).buttons["更多"]
     XCTAssertTrue(more.exists)
-    XCTAssertEqual(app.tabBars.count, 1, "不能同时保留旧底栏")
+    XCTAssertEqual(
+      app.descendants(matching: .any).matching(identifier: "native-root-navigation").count, 1,
+      "不能同时保留旧底栏")
     for root in roots {
       XCTAssertEqual(root.frame.midY, more.frame.midY, accuracy: 4)
-      XCTAssertGreaterThanOrEqual(root.frame.height, 52, "主导航保持原生底栏的大点击区域")
+      let minimumHeight: CGFloat =
+        if #available(iOS 26, *), UIDevice.current.userInterfaceIdiom != .pad { 52 } else { 56 }
+      XCTAssertGreaterThanOrEqual(root.frame.height, minimumHeight, "主导航保持系统推荐的点击区域")
       XCTAssertGreaterThanOrEqual(root.frame.width, 52)
     }
     let action = app.buttons["native-bottom-action"]
     if action.exists {
       XCTAssertEqual(action.frame.midY, more.frame.midY, accuracy: 4)
       XCTAssertGreaterThanOrEqual(action.frame.minX - more.frame.maxX, 8)
+      if #unavailable(iOS 26) {
+        XCTAssertEqual(
+          rootNavigation(app).frame.minY, action.frame.minY, accuracy: 1)
+        XCTAssertEqual(
+          rootNavigation(app).frame.maxY, action.frame.maxY, accuracy: 1)
+      }
     } else {
       XCTAssertEqual(
-        app.tabBars["native-root-navigation"].frame.midX, app.frame.midX, accuracy: 2,
+        rootNavigation(app).frame.midX, app.frame.midX, accuracy: 2,
         "没有动态动作时，主导航应居中使用整行空间")
     }
+  }
+
+  /// Duo 主入口和动态动作必须同处系统操作栏，且不再出现自定义底栏。
+  private func assertSystemOperationBarLayout(_ app: XCUIApplication) {
+    let bar = duoOperationBar(app)
+    let roots = bar.buttons.allElementsBoundByIndex.filter {
+      $0.identifier.hasPrefix("native-root-")
+    }
+    XCTAssertEqual(roots.count, 4)
+    XCTAssertFalse(rootNavigation(app).exists, "Duo 不应同时保留自定义底栏")
+    for root in roots {
+      XCTAssertGreaterThanOrEqual(root.frame.minX, bar.frame.minX - 1)
+      XCTAssertLessThanOrEqual(root.frame.maxX, bar.frame.maxX + 1)
+      XCTAssertGreaterThanOrEqual(root.frame.height, 32)
+    }
+    let action = app.buttons["native-bottom-action"]
+    if action.exists {
+      XCTAssertGreaterThanOrEqual(action.frame.minX, bar.frame.minX - 1)
+      XCTAssertLessThanOrEqual(action.frame.maxX, bar.frame.maxX + 1)
+    }
+  }
+
+  /// 根据设备选择系统操作栏或普通底栏，目录滚动锚点始终避开当前控件。
+  private func nativeRootBar(_ app: XCUIApplication) -> XCUIElement {
+    if ProcessInfo.processInfo.environment["SIMULATOR_MODEL_IDENTIFIER"] == "iPhone19,4" {
+      return duoOperationBar(app)
+    }
+    return rootNavigation(app)
+  }
+
+  /// 返回 Duo 上由 UIKit 创建的系统工具栏；其系统可访问性标识在不同 Xcode 版本中可能变化。
+  private func duoOperationBar(_ app: XCUIApplication) -> XCUIElement {
+    app.toolbars.element(boundBy: 0)
   }
 
   /// 通过真实目录滚动找到授权入口，避免点击底部导航覆盖的行。
@@ -4600,10 +5217,11 @@ final class NativeFrameworkTests: XCTestCase {
     let menu = app.tables["more-menu"]
     let item = menu.cells.containing(.staticText, identifier: title).firstMatch
     for _ in 0..<12 {
-      if item.exists, item.isHittable,
-        item.frame.maxY < app.tabBars["native-root-navigation"].frame.minY
-      {
-        return item
+      if item.exists, item.isHittable {
+        let clearsNavigation =
+          ProcessInfo.processInfo.environment["SIMULATOR_MODEL_IDENTIFIER"] == "iPhone19,4"
+          || item.frame.maxY < nativeRootBar(app).frame.minY
+        if clearsNavigation { return item }
       }
       menu.swipeUp()
     }
@@ -4613,7 +5231,7 @@ final class NativeFrameworkTests: XCTestCase {
 
   /// 从任意业务页重置更多目录，再按原目录标题打开页面，不直接操纵 Web 路由。
   private func openMorePage(_ title: String, app: XCUIApplication) {
-    app.tabBars["native-root-navigation"].buttons["更多"].tap()
+    nativeRootBar(app).buttons["更多"].tap()
     let menu = app.tables["more-menu"]
     XCTAssertTrue(menu.waitForExistence(timeout: 10))
     moreItem(title, app: app).tap()
@@ -4655,8 +5273,10 @@ final class NativeFrameworkTests: XCTestCase {
   }
 
   /// 将系统最终画面保存在测试结果包中，避免仅以节点查询替代外观验收。
-  private func attachScreen(_ name: String, app: XCUIApplication) {
-    dismissUpdateReminderIfVisible(app)
+  private func attachScreen(
+    _ name: String, app: XCUIApplication, dismissUpdateReminder: Bool = true
+  ) {
+    if dismissUpdateReminder { self.dismissUpdateReminderIfVisible(app) }
     let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
     attachment.name = name
     attachment.lifetime = .keepAlways

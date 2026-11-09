@@ -22,7 +22,7 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
   let instance: SavedInstance
   let webView: WKWebView
   let content: WebContentController
-  weak var shell: ShellController?
+  weak var shell: (any NativeShell)?
   var onNavigationReady: (() -> Void)?
   private let relay: ScriptRelay
   private var session = ChromeSession()
@@ -50,6 +50,7 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
   private var downloadWebViews: [ObjectIdentifier: WKWebView] = [:]
   private var authentication: AuthenticationResult?
   private let onAuthenticationRequired: () -> Void
+  private let onConnectionFailed: (String) -> Void
   private var usageLookupStarted = false
   private var notificationLookupStarted = false
   private var notificationNavigationAvailable = false
@@ -96,17 +97,19 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
     },
     send: { [weak self] type, payload in self?.send(type, payload: payload) })
 
-  /// 数据容器按实例 UUID 隔离；不将 Safari 或其他实例 Cookie 导入此会话。
+  /// 数据容器按实例隔离；iOS 16 由原生会话恢复登录，不共享默认网页存储。
   init(
     instance: SavedInstance, authentication: AuthenticationResult,
-    onAuthenticationRequired: @escaping () -> Void
+    onAuthenticationRequired: @escaping () -> Void,
+    onConnectionFailed: @escaping (String) -> Void
   ) {
     self.instance = instance
     self.authentication = authentication
     self.onAuthenticationRequired = onAuthenticationRequired
+    self.onConnectionFailed = onConnectionFailed
     relay = ScriptRelay()
     let configuration = WKWebViewConfiguration()
-    configuration.websiteDataStore = WKWebsiteDataStore(forIdentifier: instance.id)
+    configuration.websiteDataStore = Self.websiteDataStore(for: instance.id)
     configuration.allowsInlineMediaPlayback = true
     // 原生菜单异步调用网页动作，没有浏览器手势标记；新窗口仍须经过来源与 URL 校验。
     configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
@@ -164,6 +167,14 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
         self?.layoutChanged()
       }
     }
+  }
+
+  /// iOS 17 起按 UUID 持久化；旧系统每次连接使用独立内存仓，避免同源服务串号。
+  private static func websiteDataStore(for instanceID: UUID) -> WKWebsiteDataStore {
+    if #available(iOS 17.0, *) {
+      return WKWebsiteDataStore(forIdentifier: instanceID)
+    }
+    return .nonPersistent()
   }
 
   /// 开始唯一顶层导航，页面内部 hash 路由不调用此方法。
@@ -485,12 +496,17 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
     } else {
       guard snapshot.route.canGoBack, snapshot.presentation?.sheet == nil,
         snapshot.presentation?.overlayOpen != true,
-        keyboardFrame.map({
-          webView.convert($0, from: nil).intersection(webView.bounds).height <= 0
-        }) ?? true
+        Self.keyboardOcclusion(in: webView, frame: keyboardFrame) <= 0
       else { return nil }
     }
     return EdgeBackIdentity(sessionID: id, routeRevision: session.routeRevision, sheetID: sheetID)
+  }
+
+  /// 键盘通知使用屏幕坐标；按当前窗口转换，兼容不在屏幕原点的分屏与可移动窗口。
+  static func keyboardOcclusion(in view: UIView, frame: CGRect?) -> CGFloat {
+    guard let frame, let window = view.window else { return 0 }
+    let localFrame = view.convert(frame, from: window.screen.coordinateSpace)
+    return max(0, view.bounds.intersection(localFrame).height)
   }
 
   /// 完成时重新核对会话和路由，只发送一次原有返回或弹窗关闭意图。
@@ -973,7 +989,7 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
     }
   }
 
-  /// 连接失败不输出底层 URL 或用户数据，保留重试与配置出口。
+  /// 启动文档连接失败时返回地址列表，不输出底层 URL 或用户数据。
   func webView(
     _ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!,
     withError error: Error
@@ -985,10 +1001,10 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
       if ConnectionFailure(error) != .cancelled { showDownloadFailure() }
       return
     }
-    if let message = ConnectionFailure(error).errorDescription { fail(message) }
+    handleNavigationFailure(error)
   }
 
-  /// 已提交文档的加载错误同样进入可操作的恢复状态。
+  /// 已提交文档尚未就绪时也允许重新选择地址，正常使用后的故障保留原来的恢复入口。
   func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
     guard !convertingDownloadWebViews.contains(ObjectIdentifier(webView)) else { return }
     guard webView === self.webView else {
@@ -996,7 +1012,15 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
       if ConnectionFailure(error) != .cancelled { showDownloadFailure() }
       return
     }
-    if let message = ConnectionFailure(error).errorDescription { fail(message) }
+    handleNavigationFailure(error)
+  }
+
+  /// 仅当前容器的非取消网络故障能够退出启动，切换服务后的旧回调不能接管新窗口。
+  private func handleNavigationFailure(_ error: Error) {
+    guard relay.owner != nil, let message = ConnectionFailure(error).errorDescription else {
+      return
+    }
+    if startupPending { onConnectionFailed(message) } else { fail(message) }
   }
 
   /// 内容进程在后台被系统回收后，回到前台重新载入文档并恢复原生接管。
