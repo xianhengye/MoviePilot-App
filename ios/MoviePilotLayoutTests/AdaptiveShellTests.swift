@@ -301,6 +301,42 @@ final class AdaptiveShellTests: XCTestCase {
       failures.count, 1, "Stopped sessions must not replace the active connection screen")
   }
 
+  func testDuoPlaybackContainerKeepsSameControllerAcrossSizes() throws {
+    resize(width: 466, height: 678, regular: false)
+    shell.apply(try snapshot())
+    let manifest = MediaPlaybackManifest(
+      itemId: "layout-fixture", server: nil,
+      title: "Fixture", contentUrl: try XCTUnwrap(URL(string: "http://127.0.0.1:9/media")),
+      mediaType: "video", artist: nil, album: nil, subtitles: [], lyricsUrl: nil)
+    let client = MediaPlaybackClient(
+      address: try ServerAddress("http://127.0.0.1:9"), accessToken: "fixture-only")
+    let player = MediaPlaybackViewController(
+      manifest: manifest, client: client,
+      instanceId: UUID(), itemId: "layout-fixture", displayTitle: "Fixture",
+      onMinimize: { [weak shell] in shell?.minimizePlayback($0) },
+      onExpand: { [weak shell] in shell?.expandPlayback($0) },
+      onClosePlayback: { [weak shell] in shell?.closePlayback($0) })
+    // Exercise the real shell containment without starting decoder/network/audio in a layout test.
+    player.view = UIView()
+    shell.presentPlayback(player)
+    shell.view.layoutIfNeeded()
+    let container = try find("playback-container")
+    XCTAssertTrue(player.parent === shell)
+    XCTAssertEqual(container.bounds.size, shell.view.bounds.size)
+    shell.minimizePlayback(player)
+    shell.view.layoutIfNeeded()
+    XCTAssertEqual(container.bounds.width, 236, accuracy: 1)
+    XCTAssertEqual(container.bounds.height, 170, accuracy: 1)
+    resize(width: 1000, height: 700, regular: true)
+    XCTAssertTrue(player.parent === shell)
+    shell.expandPlayback(player)
+    shell.view.layoutIfNeeded()
+    XCTAssertEqual(container.bounds.size, shell.view.bounds.size)
+    shell.closePlayback(player)
+    XCTAssertNil(player.parent)
+    XCTAssertNil(container.superview)
+  }
+
   func testDeviceFactorySelectsIsolatedImplementations() throws {
     let duo = DeviceShellFactory.make(
       coordinator: coordinator, onConnection: {}, modelIdentifier: "iPhone19,4")

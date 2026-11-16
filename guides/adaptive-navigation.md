@@ -2,7 +2,7 @@
 
 ## 两套界面实现
 
-- `ios/MoviePilot/ShellController.swift` 与 `BottomNavigationView.swift` 保留上游 `49a0b049f74bd0f480de243e22623f23317af8b0` 的原始内容。Python 回归校验 SHA-256，防止 Duo 调整意外改动原版导航。
+- `ios/MoviePilot/ShellController.swift` 与 `BottomNavigationView.swift` 保留上游 `f72877f5722e499e17de38f5db064b11cff54a18` 的原始内容。Python 回归校验 SHA-256，防止 Duo 调整意外改动原版导航。
 - `DeviceShellFactory` 在建立认证后的界面时选择实现。只有已确认的 Duo 型号 `iPhone19,4` 使用 `Duo/DuoShellController.swift`；iPhone 18、其他直板机型、iPad 和未知型号使用原版。
 - 真机通过 `uname` 获取型号，模拟器使用系统的 `SIMULATOR_MODEL_IDENTIFIER`。不根据屏幕宽度、设备名称或系统版本猜测型号。
 - 两套界面通过 `NativeShell` 共用原有登录、WebCoordinator、单一 WebView 和业务通信。协议遵循在独立文件声明，不修改原版界面文件。
@@ -40,3 +40,12 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild test \
 合成测试验证系统控制器层级、入口与搜索、单一网页与输入状态保留、路由确认、全屏／浮层禁用，以及非 Duo 仍运行原版。模拟器尺寸测试不能证明 iOS 27.1+ 的真机侧边控制区摆放，折叠和左右分屏必须另行真机验收。
 
 个人签名只用于本机构建，不提交 Team ID、账号、证书或描述文件。
+
+
+## 2026-11-16 待验证的主线同步
+
+已合入上游 `f72877f5722e499e17de38f5db064b11cff54a18`（1.2.3，build 13），在 Duo 中同步嵌套弹窗转场、多语言菜单及悬浮播放器宿主，保留系统侧边标签栏和搜索宿主修复。非 Duo 导航文件与此上游版本完全一致。
+
+当前仅核心单元测试、Python 检查、语言 bootstrap 测试和 Swift 格式检查通过。Xcode 等待官方下载约 910 MB 的 VLCKit 二进制包；2026-11-16 的代理和直连采样均仅约 13–21 KB/s。模拟器构建、11 项宿主界面测试（包括新增播放器容器测试）、设备构建与新功能真机验收均尚未完成。此分支仅供继续验证，不能作为已验证的续签安装版本。
+
+继续工作时先完成依赖解析并验证校验和，运行 MoviePilotLayoutTests、模拟器 build-for-testing 和个人签名真机构建；确认播放／小窗／嵌套弹窗／语言切换的行为，再将此更新合入适配分支。稳定安装提交仍为 `7bd8e21`。
