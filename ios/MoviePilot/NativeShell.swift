@@ -4,6 +4,11 @@ import UIKit
 /// Shared bridge contract; device-specific shells own their UI without changing business routing.
 @MainActor
 protocol NativeShell: AnyObject where Self: UIViewController {
+  func presentPlayback(_ controller: MediaPlaybackViewController)
+  func minimizePlayback(_ controller: MediaPlaybackViewController)
+  func expandPlayback(_ controller: MediaPlaybackViewController)
+  func closePlayback()
+  func closePlayback(_ controller: MediaPlaybackViewController)
   func setLoading(_ loading: Bool)
   func prepareDocumentHost()
   func prepare(_ snapshot: NavigationSnapshot)

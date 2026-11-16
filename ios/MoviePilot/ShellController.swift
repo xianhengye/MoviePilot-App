@@ -132,6 +132,10 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
   private var searchPage: SearchPageController?
   private let bottomNavigation = BottomNavigationView()
   private let bottomNavigationHost = UIViewController()
+  private var playbackController: MediaPlaybackViewController?
+  private var playbackContainer: UIView?
+  private var playbackFullScreenConstraints: [NSLayoutConstraint] = []
+  private var playbackMiniConstraints: [NSLayoutConstraint] = []
   private var panelNavigation: UINavigationController?
   private var panelImages: NativePanelImageLoader?
   private var panelAction: ActionSnapshot?
@@ -217,6 +221,103 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
     synchronizePanelAnchor()
     synchronizeNavigationPreviewContext()
     coordinator.layoutChanged()
+    if let playbackContainer { view.bringSubviewToFront(playbackContainer) }
+  }
+
+  /// 在 Shell 中常驻同一播放器控制器，缩放时保留当前解码与播放状态。
+  func presentPlayback(_ controller: MediaPlaybackViewController) {
+    guard playbackController == nil, presentedViewController == nil else {
+      controller.closeFromShell()
+      return
+    }
+    playbackController = controller
+    addChild(controller)
+
+    let container = UIView()
+    container.accessibilityIdentifier = "playback-container"
+    container.backgroundColor = .black
+    container.translatesAutoresizingMaskIntoConstraints = false
+    view.addSubview(container)
+    playbackContainer = container
+
+    controller.view.translatesAutoresizingMaskIntoConstraints = false
+    container.addSubview(controller.view)
+    playbackFullScreenConstraints = [
+      container.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+      container.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+      container.topAnchor.constraint(equalTo: view.topAnchor),
+      container.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+    ]
+    playbackMiniConstraints = [
+      container.trailingAnchor.constraint(
+        equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
+      container.bottomAnchor.constraint(
+        equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -86),
+      container.widthAnchor.constraint(equalToConstant: 236),
+      container.heightAnchor.constraint(equalToConstant: 170),
+    ]
+    NSLayoutConstraint.activate([
+      controller.view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+      controller.view.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+      controller.view.topAnchor.constraint(equalTo: container.topAnchor),
+      controller.view.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+    ])
+    NSLayoutConstraint.activate(playbackFullScreenConstraints)
+    controller.didMove(toParent: self)
+    view.bringSubviewToFront(container)
+  }
+
+  /// 将 Shell 托管的播放器容器缩到右下角，不改变播放器控制器层级。
+  func minimizePlayback(_ controller: MediaPlaybackViewController) {
+    guard playbackController === controller, let container = playbackContainer else { return }
+    controller.setMiniWindow(true)
+    container.layer.cornerRadius = 14
+    container.layer.cornerCurve = .continuous
+    container.layer.borderWidth = 0.8
+    container.layer.borderColor = UIColor.white.withAlphaComponent(0.2).cgColor
+    container.layer.shadowColor = UIColor.black.cgColor
+    container.layer.shadowOpacity = 0.32
+    container.layer.shadowRadius = 16
+    container.layer.shadowOffset = CGSize(width: 0, height: 5)
+    NSLayoutConstraint.deactivate(playbackFullScreenConstraints)
+    NSLayoutConstraint.activate(playbackMiniConstraints)
+    UIView.animate(withDuration: 0.24) { self.view.layoutIfNeeded() }
+  }
+
+  /// 将播放器容器扩展至 Shell 全屏，继续使用同一解码器和播放时间。
+  func expandPlayback(_ controller: MediaPlaybackViewController) {
+    guard playbackController === controller, let container = playbackContainer else { return }
+    NSLayoutConstraint.deactivate(playbackMiniConstraints)
+    NSLayoutConstraint.activate(playbackFullScreenConstraints)
+    container.layer.cornerRadius = 0
+    container.layer.borderWidth = 0
+    container.layer.shadowOpacity = 0
+    controller.setMiniWindow(false)
+    UIView.animate(withDuration: 0.24) { self.view.layoutIfNeeded() }
+  }
+
+  /// 停止当前播放器并移除 Shell 托管的全屏或悬浮容器。
+  func closePlayback() {
+    playbackController?.closeFromShell()
+  }
+
+  /// 从 Shell 移除已停止的播放器并释放控制器父子关系与布局约束。
+  private func removePlayback(_ controller: MediaPlaybackViewController) {
+    guard playbackController === controller, let container = playbackContainer else { return }
+    controller.willMove(toParent: nil)
+    NSLayoutConstraint.deactivate(playbackFullScreenConstraints + playbackMiniConstraints)
+    controller.view.removeFromSuperview()
+    controller.removeFromParent()
+    container.removeFromSuperview()
+    playbackController = nil
+    playbackContainer = nil
+    playbackFullScreenConstraints = []
+    playbackMiniConstraints = []
+  }
+
+  /// 连接播放器关闭回调并执行 Shell 内的移除流程。
+  func closePlayback(_ controller: MediaPlaybackViewController) {
+    removePlayback(controller)
   }
 
   /// 预览只跨同一文档、主题与窗口保留，外观或身份变化不复用旧画面。
@@ -535,7 +636,7 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
   /// 等待较久后显示安全恢复入口；重试仅重新加载当前文档，不重放业务动作。
   func showStartupWait() {
     startupView?.showPageWait(
-      message: "页面仍在加载，正在等待连接和页面资源就绪。",
+      message: L10n.text("页面仍在加载，正在等待连接和页面资源就绪。"),
       retry: { [weak self] in
         guard let self, self.startupView != nil else { return }
         self.coordinator.reload()
@@ -561,7 +662,7 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
     panel.backgroundColor = .systemBackground
     panel.translatesAutoresizingMaskIntoConstraints = false
     let title = UILabel()
-    title.text = "暂时无法打开 MoviePilot"
+    title.text = L10n.text("暂时无法打开 MoviePilot")
     title.font = .preferredFont(forTextStyle: .title2)
     title.adjustsFontForContentSizeCategory = true
     title.numberOfLines = 0
@@ -573,12 +674,12 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
     detail.numberOfLines = 0
     var config: UIButton.Configuration = .filled()
     if #available(iOS 26.0, *) { config = .prominentGlass() }
-    config.title = "重新打开"
+    config.title = L10n.text("重新打开")
     let retry = UIButton(
       configuration: config,
       primaryAction: UIAction { [weak self] _ in self?.coordinator.reload() })
     var secondary = UIButton.Configuration.plain()
-    secondary.title = "更改服务地址"
+    secondary.title = L10n.text("更改服务地址")
     let change = UIButton(
       configuration: secondary, primaryAction: UIAction { [weak self] _ in self?.onConnection() })
     let stack = UIStackView(arrangedSubviews: [title, detail, retry, change])
@@ -703,12 +804,12 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
       ? [
         UIBarButtonItem(
           image: UIImage(systemName: "chevron.backward"),
-          primaryAction: UIAction(title: "返回") { [weak self] _ in
+          primaryAction: UIAction(title: L10n.text("返回")) { [weak self] _ in
             self?.coordinator.command(
               "navigation.back", payload: .object(["source": .string("button")]))
           })
       ] : nil
-    host.navigationItem.leftBarButtonItems?.first?.accessibilityLabel = "返回"
+    host.navigationItem.leftBarButtonItems?.first?.accessibilityLabel = L10n.text("返回")
     let previousMenu = host.navigationItem.rightBarButtonItems?.first
     let menu = connectionItem(
       overflow: trailing, enabled: snapshot.presentation?.overlayOpen != true, reusing: previousMenu
@@ -757,7 +858,7 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
       button.menu = UIMenu(children: items)
       button.showsMenuAsPrimaryAction = true
       button.isEnabled = snapshot.presentation?.overlayOpen != true
-      button.accessibilityLabel = "\(snapshot.route.title)，页内分类"
+      button.accessibilityLabel = L10n.format("%@，页内分类", snapshot.route.title)
       button.accessibilityValue = tabs.items.first { $0.id == tabs.selectedId }?.title
       button.widthAnchor.constraint(greaterThanOrEqualToConstant: 64).isActive = true
       button.heightAnchor.constraint(equalToConstant: 44).isActive = true
@@ -915,7 +1016,7 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
     let existingContainer = item?.customView as? NativeMenuButtonContainer
     let existing = existingContainer?.button ?? (item?.customView as? NativeMenuButton)
     let button = existing ?? NativeMenuButton(configuration: configuration)
-    button.accessibilityLabel = "操作菜单"
+    button.accessibilityLabel = L10n.text("操作菜单")
     button.accessibilityIdentifier = "native-top-actions"
     button.isEnabled = enabled
     if existing == nil {
@@ -957,7 +1058,7 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
       }
       // 旧前端的动态按钮未声明标题，按已确认的页面功能补全；新前端标题优先。
       let path = self.latest?.route.fullPath.components(separatedBy: "?")[0]
-      let legacyTitles = ["/recommend": "自定义推荐", "/discover": "自定义探索"]
+      let legacyTitles = ["/recommend": L10n.text("自定义推荐"), "/discover": L10n.text("自定义探索")]
       let title =
         !action.isGlobal && action.actionId.hasSuffix(":accessory")
           && (action.title == "当前页面" || action.title.hasSuffix(" · 更多"))
@@ -976,9 +1077,13 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
       }
     }
     let connection = UIMenu(
-      title: "连接与显示", image: UIImage(systemName: "gearshape"),
+      title: L10n.text("连接与显示"), image: UIImage(systemName: "gearshape"),
       children: [
-        UIAction(title: "通知", image: UIImage(systemName: "bell.badge")) { [weak self] _ in
+        LanguageSettings.menu { [weak self] language in
+          self?.coordinator.selectLanguage(language)
+        },
+        UIAction(title: L10n.text("通知"), image: UIImage(systemName: "bell.badge")) {
+          [weak self] _ in
           guard let self else { return }
           let settings = NotificationController(coordinator: self.coordinator)
           let navigation = UINavigationController(rootViewController: settings)
@@ -989,11 +1094,12 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
           navigation.sheetPresentationController?.detents = [.medium(), .large()]
           navigation.sheetPresentationController?.prefersGrabberVisible = true
           self.present(navigation, animated: true)
-        }
+        },
       ]
         + (coordinator.widgetsAvailable
           ? [
-            UIAction(title: "小组件", image: UIImage(systemName: "square.grid.2x2")) { [weak self] _ in
+            UIAction(title: L10n.text("小组件"), image: UIImage(systemName: "square.grid.2x2")) {
+              [weak self] _ in
               guard let self, self.coordinator.widgetsAvailable else { return }
               let settings = WidgetController(coordinator: self.coordinator)
               let navigation = UINavigationController(rootViewController: settings)
@@ -1006,10 +1112,12 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
               self.present(navigation, animated: true)
             }
           ] : []) + [
-          UIAction(title: "重新加载", image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in
+          UIAction(title: L10n.text("重新加载"), image: UIImage(systemName: "arrow.clockwise")) {
+            [weak self] _ in
             self?.coordinator.reload()
           },
-          UIAction(title: "切换服务", image: UIImage(systemName: "server.rack")) { [weak self] _ in
+          UIAction(title: L10n.text("切换服务"), image: UIImage(systemName: "server.rack")) {
+            [weak self] _ in
             self?.onConnection()
           },
         ])
@@ -1017,7 +1125,7 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
     let common = globals.filter { !$0.actionId.hasSuffix(":global:profile") }
     var groups = [
       UIMenu(
-        title: "常用入口", options: .displayInline,
+        title: L10n.text("常用入口"), options: .displayInline,
         children: common.map(menuElement) + [connection] + user.map(menuElement))
     ]
     // 仪表盘的页面动作已经移到一级菜单，展开其子项后仍保留统一的页面分组标题。
@@ -1031,7 +1139,7 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
     }
     if !pageElements.isEmpty {
       groups.append(
-        UIMenu(title: "当前页面", options: .displayInline, children: pageElements))
+        UIMenu(title: L10n.text("当前页面"), options: .displayInline, children: pageElements))
     }
     let menu = UIMenu(children: groups)
     button.apply(menu: menu)
@@ -1149,8 +1257,8 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
   /// 通知属于其他登录身份时给出系统提示，不自动切换账号或加载外部地址。
   func showNotificationMessage(_ message: String) {
     guard presentedViewController == nil else { return }
-    let alert = UIAlertController(title: "通知", message: message, preferredStyle: .alert)
-    alert.addAction(UIAlertAction(title: "好", style: .default))
+    let alert = UIAlertController(title: L10n.text("通知"), message: message, preferredStyle: .alert)
+    alert.addAction(UIAlertAction(title: L10n.text("好"), style: .default))
     present(alert, animated: true)
   }
 
@@ -1165,7 +1273,7 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
     configuration.showsActivityIndicator = action.loading
     let button = UIButton(configuration: configuration)
     button.accessibilityLabel = action.title
-    button.accessibilityHint = hasMenu ? "显示操作菜单" : nil
+    button.accessibilityHint = hasMenu ? L10n.text("显示操作菜单") : nil
     button.isEnabled = action.enabled && !action.loading
     button.addAction(
       UIAction { [weak self, weak button] _ in
@@ -1230,8 +1338,7 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
     }
     if let controller = webSheet {
       if sheetAttachedID != descriptor.id {
-        // 同一系统 Sheet 切回父弹窗时，旧子窗的透明退出截图不能叠在新的 HTML 内容上。
-        sheetExitPlaceholder?.removeFromSuperview()
+        controller.prepareContentTransition(to: descriptor.id, placeholder: sheetExitPlaceholder)
         sheetExitPlaceholder = nil
       }
       sheetNavigation?.overrideUserInterfaceStyle = overrideUserInterfaceStyle
@@ -1341,6 +1448,7 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
         return
       }
       self.sheetAttachmentIDs = [descriptor.id]
+      controller.finishContentTransition(to: descriptor.id)
       guard let navigation = self.sheetNavigation, navigation.presentingViewController == nil,
         self.presentedViewController == nil, self.nativeVisible,
         self.latest?.presentation?.sheet?.id == descriptor.id
@@ -1411,6 +1519,7 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
       }
       return
     }
+    webSheet?.cancelContentTransition()
     preserveWebSheetExit()
     sheetDismissing = true
     let token = UUID()
@@ -1815,7 +1924,7 @@ final class ShellController: UIViewController, UIPopoverPresentationControllerDe
           self.coordinator.invoke(action)
         }
       })
-    button.accessibilityLabel = "搜索"
+    button.accessibilityLabel = L10n.text("搜索")
     button.isEnabled = action?.enabled == true && snapshot.presentation?.overlayOpen != true
     return button
   }

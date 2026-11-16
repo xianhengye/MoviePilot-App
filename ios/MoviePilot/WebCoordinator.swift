@@ -49,6 +49,7 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
   private var popupWebViews: [ObjectIdentifier: WKWebView] = [:]
   private var downloadWebViews: [ObjectIdentifier: WKWebView] = [:]
   private var authentication: AuthenticationResult?
+  private var streamAccessToken: String?
   private let onAuthenticationRequired: () -> Void
   private let onConnectionFailed: (String) -> Void
   private var usageLookupStarted = false
@@ -58,6 +59,9 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
   private var widgetContextChecked = false
   private var cardMenusNegotiated = false
   private var standaloneMenusNegotiated = false
+  private var playbackNegotiated = false
+  private var playbackGeneration = 0
+  private var playbackTask: Task<Void, Never>?
   private lazy var cardMenus = CardMenuBridge(
     webView: webView,
     context: { [weak self] in
@@ -115,6 +119,7 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
     configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
     configuration.userContentController.add(relay, name: "moviepilotChrome")
     configuration.userContentController.add(relay, name: "moviepilotAuthentication")
+    configuration.userContentController.add(relay, name: "moviepilotLanguage")
     if let path = Bundle.main.url(forResource: "BridgeBootstrap", withExtension: "js"),
       let script = try? String(contentsOf: path, encoding: .utf8)
     {
@@ -127,6 +132,7 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
             with: WidgetFeature.isEnabled ? "widgetsVersion: 1," : ""),
           injectionTime: .atDocumentStart, forMainFrameOnly: true))
     }
+    Self.installLanguageScript(in: configuration, instance: instance)
     if let data = try? JSONEncoder().encode(authentication.session.browserStorage),
       let raw = String(data: data, encoding: .utf8),
       let literalData = try? JSONEncoder().encode(raw),
@@ -182,6 +188,7 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
     shell?.setLoading(true)
     armStartupTimeout()
     let cookies = authentication?.cookies ?? []
+    streamAccessToken = authentication?.session.accessToken
     authentication = nil
     Task { [weak self] in
       guard let self else { return }
@@ -201,6 +208,8 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
     onNavigationReady = nil
     cardMenusNegotiated = false
     standaloneMenusNegotiated = false
+    playbackNegotiated = false
+    cancelPlaybackRequest()
     cardMenus.stop()
     standaloneMenus.invalidate()
     if NotificationService.shared.coordinator === self { NotificationService.shared.attach(nil) }
@@ -220,8 +229,11 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
       forName: "moviepilotChrome")
     webView.configuration.userContentController.removeScriptMessageHandler(
       forName: "moviepilotAuthentication")
+    webView.configuration.userContentController.removeScriptMessageHandler(
+      forName: "moviepilotLanguage")
     webView.configuration.userContentController.removeAllUserScripts()
     authentication = nil
+    streamAccessToken = nil
     lastConfirmedURL = nil
     relay.owner = nil
     content.onLayout = nil
@@ -282,7 +294,7 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
     guard pendingProcessRecovery else { return }
     pendingProcessRecovery = false
     guard !automaticRecoveryAttempted else {
-      fail("页面暂时无法恢复，请检查连接后重新打开。未确认的操作不会自动重试。")
+      fail(L10n.text("页面暂时无法恢复，请检查连接后重新打开。未确认的操作不会自动重试。"))
       return
     }
     reload(automatically: true)
@@ -365,7 +377,7 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
           guard let self, self.documentID == document, self.lifecycle == "active",
             self.content.resumePreviewToken == token
           else { return }
-          self.fail("页面尚未恢复绘制，请重新打开。未确认的操作不会自动重试。")
+          self.fail(L10n.text("页面尚未恢复绘制，请重新打开。未确认的操作不会自动重试。"))
         }
       } else {
         self.recoverNavigation()
@@ -535,7 +547,7 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
     guard ["status", "pair", "register", "unregister", "test"].contains(action),
       relay.owner != nil, let url = webView.url, instance.address.contains(url),
       session.phase == .nativeNavigation
-    else { throw NotificationFailure(message: "请等待页面登录并完成加载。") }
+    else { throw NotificationFailure(message: L10n.text("请等待页面登录并完成加载。")) }
     let document = documentID
     let identitySession = session.sessionId
     let endpoint = instance.address.url.appendingPathComponent("api/v1/notification/app")
@@ -565,19 +577,20 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
           if let value = value as? String {
             continuation.resume(returning: value)
           } else {
-            continuation.resume(throwing: NotificationFailure(message: "通知服务响应无效。"))
+            continuation.resume(throwing: NotificationFailure(message: L10n.text("通知服务响应无效。")))
           }
         case .failure:
-          continuation.resume(throwing: NotificationFailure(message: "无法连接通知服务，请检查网络与登录状态。"))
+          continuation.resume(
+            throwing: NotificationFailure(message: L10n.text("无法连接通知服务，请检查网络与登录状态。")))
         }
       }
     }
     guard document == documentID, identitySession == session.sessionId, relay.owner != nil else {
-      throw NotificationFailure(message: "登录状态已改变，请重新打开通知设置。")
+      throw NotificationFailure(message: L10n.text("登录状态已改变，请重新打开通知设置。"))
     }
     let reply = try JSONDecoder().decode(NotificationReply.self, from: Data(raw.utf8))
     guard reply.success else {
-      throw NotificationFailure(message: reply.message ?? "请先配置并启用 AppPush 通知渠道。")
+      throw NotificationFailure(message: reply.message ?? L10n.text("请先配置并启用 AppPush 通知渠道。"))
     }
     return reply.data ?? [:]
   }
@@ -641,7 +654,7 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
       session.snapshot?.presentation?.overlayOpen != true
     else { return false }
     guard notificationNavigationAvailable else {
-      shell?.showNotificationMessage("请更新兼容前端后，在通知中心查看这条消息。")
+      shell?.showNotificationMessage(L10n.text("请更新兼容前端后，在通知中心查看这条消息。"))
       return true
     }
     command("notification.open", payload: .object(["path": .string(intent.route)]))
@@ -650,7 +663,7 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
 
   /// 失配立即由原生恢复页接管，不能把已失效控件或完整网页作为降级出口。
   func recoverNavigation() {
-    fail("App 导航连接已中断。请确认实例前端已更新，再重新打开。")
+    fail(L10n.text("App 导航连接已中断。请确认实例前端已更新，再重新打开。"))
   }
 
   /// 合并同一轮多次 UIKit 布局回调，只发送改变后的可见几何。
@@ -679,6 +692,18 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
     let source = BridgeSource(
       isMainFrame: message.frameInfo.isMainFrame, isCurrentWebView: message.webView === webView,
       origin: WebOrigin(scheme: security.protocol, host: security.host, port: security.port))
+    if message.name == "moviepilotLanguage" {
+      guard source.isMainFrame, source.isCurrentWebView, source.origin == instance.address.origin,
+        let body = message.body as? [String: Any], body.count == 3,
+        body["version"] as? Int == 1, body["type"] as? String == "changed",
+        let raw = body["locale"] as? String, let language = AppLanguage(rawValue: raw),
+        LanguagePreferences(defaults: .standard).receive(language, for: instance.id)
+      else { return }
+      Self.installLanguageScript(in: webView.configuration, instance: instance)
+      LanguageSettings.refreshShortcuts()
+      if let snapshot = session.snapshot { shell?.apply(snapshot) }
+      return
+    }
     if message.name == "moviepilotAuthentication" {
       guard source.isMainFrame, source.isCurrentWebView, source.origin == instance.address.origin,
         let body = message.body as? [String: Any], body.count == 2,
@@ -690,6 +715,9 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
       WidgetService.shared.endSession(instanceId: instance.id, clear: true)
       cardMenus.invalidate()
       standaloneMenus.invalidate()
+      streamAccessToken = nil
+      playbackNegotiated = false
+      cancelPlaybackRequest()
       onAuthenticationRequired()
       return
     }
@@ -710,6 +738,58 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
     }
   }
 
+  /// 初始脚本只接触当前同源实例的白名单偏好，JSON 编码避免 URL 或语言插入脚本。
+  private static func installLanguageScript(
+    in configuration: WKWebViewConfiguration, instance: SavedInstance
+  ) {
+    guard let url = Bundle.main.url(forResource: "LanguageBootstrap", withExtension: "js"),
+      let script = try? String(contentsOf: url, encoding: .utf8),
+      let origin = URLComponents(url: instance.address.url, resolvingAgainstBaseURL: false)
+    else { return }
+    var components = URLComponents()
+    components.scheme = origin.scheme
+    components.host = origin.host
+    components.port = origin.port
+    guard let originURL = components.url else { return }
+    let preferences = LanguagePreferences(defaults: .standard)
+    let settings: [String: Any] = [
+      "origin": originURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")),
+      "fallback": AppLanguage.current.rawValue,
+      "selected": preferences.pending(for: instance.id).map { $0.rawValue as Any } ?? NSNull(),
+    ]
+    guard let data = try? JSONSerialization.data(withJSONObject: settings),
+      let json = String(data: data, encoding: .utf8)
+    else { return }
+    let languageScript = WKUserScript(
+      source: script.replacingOccurrences(of: "/*__MOVIEPILOT_LANGUAGE__*/", with: json),
+      injectionTime: .atDocumentStart, forMainFrameOnly: true)
+    let content = configuration.userContentController
+    let scripts = content.userScripts
+    var updated = scripts.filter {
+      !$0.source.hasPrefix("/* MoviePilot language bootstrap v1 */")
+    }
+    if let index = scripts.firstIndex(where: {
+      $0.source.hasPrefix("/* MoviePilot language bootstrap v1 */")
+    }) {
+      updated.insert(languageScript, at: min(index, updated.count))
+    } else {
+      updated.append(languageScript)
+    }
+    content.removeAllUserScripts()
+    for script in updated {
+      content.addUserScript(script)
+    }
+  }
+
+  /// 当前页面重新载入前先更新初始化脚本，断网或进程退出也保留尚未同步的明确选择。
+  func selectLanguage(_ language: AppLanguage) {
+    guard lifecycle == "active", session.phase == .nativeNavigation else { return }
+    LanguagePreferences(defaults: .standard).select(language, instanceID: instance.id)
+    Self.installLanguageScript(in: webView.configuration, instance: instance)
+    LanguageSettings.refreshShortcuts()
+    reload()
+  }
+
   /// 消息采用封闭分派表，未知消息不会成为通用原生调用入口。
   private func handle(_ message: BridgeEnvelope) throws {
     switch message.type {
@@ -721,6 +801,7 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
       standaloneMenus.invalidate()
       cardMenusNegotiated = ready.capabilities.contains("card-menus.v1")
       standaloneMenusNegotiated = ready.capabilities.contains("standalone-menus.v1")
+      playbackNegotiated = ready.capabilities.contains("playback.v1")
       let id = try session.negotiate(majors: ready.majors, capabilities: Set(ready.capabilities))
       lastLayout = nil
       send(
@@ -734,9 +815,17 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
               // 只启用网页已声明的内存缓存；旧前端不因新的可选能力失配。
               + (ready.capabilities.contains("readonly-cache.v1") ? ["readonly-cache.v1"] : []))
               .map(JSONValue.string) + (cardMenusNegotiated ? [.string("card-menus.v1")] : [])
-              + (standaloneMenusNegotiated ? [.string("standalone-menus.v1")] : [])),
+              + (standaloneMenusNegotiated ? [.string("standalone-menus.v1")] : [])
+              + (playbackNegotiated ? [.string("playback.v1")] : [])),
         ]))
       armTimeout()
+    case "playback.open":
+      guard playbackNegotiated, lifecycle == "active",
+        session.phase == .nativeNavigation, message.routeRevision == session.routeRevision
+      else { return }
+      let request = try message.decodePayload(PlaybackOpenPayload.self)
+      guard Self.isValidPlaybackRequest(request) else { throw BridgeError.invalidMessage }
+      openPlayback(request)
     case "navigation.state":
       guard let route = message.routeRevision, let state = message.stateRevision else {
         throw BridgeError.invalidMessage
@@ -801,6 +890,7 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
       // 拒绝也证明网页仍有响应；由调用者核对交接是否仍有效，已关闭弹窗的迟到结果不应中断导航。
       completion?(result.accepted)
     case "session.state":
+      cancelPlaybackRequest()
       cardMenus.invalidate()
       standaloneMenus.invalidate()
       widgetContextChecked = false
@@ -840,6 +930,140 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
       break  // v1 返回由网页优先关闭其顶层弹层，原生不猜测 DOM 栈。
     default: throw BridgeError.invalidMessage
     }
+  }
+
+  /// 只为当前页面、路由和身份请求播放清单，不把令牌交给网页桥或 URL。
+  private func openPlayback(_ request: PlaybackOpenPayload) {
+    guard let token = streamAccessToken, let sessionId = session.sessionId,
+      shell != nil
+    else {
+      presentPlaybackError()
+      return
+    }
+    cancelPlaybackRequest()
+    let generation = playbackGeneration
+    let document = documentID
+    let route = session.routeRevision
+    let address = instance.address
+    let instanceId = instance.id
+    let client = MediaPlaybackClient(address: address, accessToken: token)
+    playbackTask = Task { [weak self] in
+      guard let self else { return }
+      do {
+        let manifest = try await client.loadManifest(itemId: request.itemId, server: request.server)
+        guard !Task.isCancelled, self.playbackGeneration == generation,
+          self.documentID == document, self.session.sessionId == sessionId,
+          self.session.routeRevision == route, self.lifecycle == "active",
+          self.session.phase == .nativeNavigation, let currentShell = self.shell
+        else { return }
+        let presentationSlotAvailable = await self.waitForPlaybackPresentationSlot(
+          currentShell, generation: generation, document: document,
+          sessionId: sessionId, routeRevision: route)
+        guard self.playbackGeneration == generation, self.documentID == document,
+          self.session.sessionId == sessionId, self.session.routeRevision == route,
+          self.lifecycle == "active", self.session.phase == .nativeNavigation,
+          self.shell === currentShell
+        else { return }
+        guard presentationSlotAvailable, currentShell.presentedViewController == nil else {
+          self.presentPlaybackError()
+          return
+        }
+        currentShell.closePlayback()
+        let player = MediaPlaybackViewController(
+          manifest: manifest, client: client, instanceId: instanceId,
+          itemId: request.itemId, displayTitle: request.title,
+          onMinimize: { [weak currentShell] player in currentShell?.minimizePlayback(player) },
+          onExpand: { [weak currentShell] player in currentShell?.expandPlayback(player) },
+          onClosePlayback: { [weak currentShell] player in
+            currentShell?.closePlayback(player)
+          })
+        currentShell.presentPlayback(player)
+      } catch {
+        guard !Task.isCancelled, self.playbackGeneration == generation,
+          self.documentID == document, self.session.sessionId == sessionId,
+          self.session.routeRevision == route, self.lifecycle == "active"
+        else { return }
+        if let currentShell = self.shell {
+          _ = await self.waitForPlaybackPresentationSlot(
+            currentShell, generation: generation, document: document,
+            sessionId: sessionId, routeRevision: route)
+        }
+        guard !Task.isCancelled, self.playbackGeneration == generation,
+          self.documentID == document, self.session.sessionId == sessionId,
+          self.session.routeRevision == route, self.lifecycle == "active"
+        else { return }
+        self.presentPlaybackError()
+      }
+      if self.playbackGeneration == generation { self.playbackTask = nil }
+    }
+  }
+
+  /// 等待网页详情 Sheet 完成关闭，避免播放事件与原生弹窗转场竞争。
+  private func waitForPlaybackPresentationSlot(
+    _ expectedShell: any NativeShell, generation: Int, document: UUID,
+    sessionId: String, routeRevision: Int
+  ) async -> Bool {
+    for _ in 0..<100 {
+      guard !Task.isCancelled, playbackGeneration == generation,
+        documentID == document, session.sessionId == sessionId,
+        session.routeRevision == routeRevision, lifecycle == "active",
+        session.phase == .nativeNavigation, shell === expectedShell
+      else { return false }
+      if expectedShell.presentedViewController == nil { return true }
+      do {
+        try await Task.sleep(for: .milliseconds(100))
+      } catch {
+        return false
+      }
+    }
+    return false
+  }
+
+  /// 取消尚未展示播放器的清单请求并使所有迟到响应失效。
+  private func cancelPlaybackRequest() {
+    playbackGeneration += 1
+    playbackTask?.cancel()
+    playbackTask = nil
+  }
+
+  /// 为失败的播放清单显示固定提示，不泄露服务端地址和认证信息。
+  private func presentPlaybackError() {
+    guard lifecycle == "active", relay.owner != nil, let shell else { return }
+    var presenter: UIViewController = shell
+    while let presented = presenter.presentedViewController, !presented.isBeingDismissed {
+      guard !(presented is UIAlertController) else { return }
+      presenter = presented
+    }
+    let alert = UIAlertController(
+      title: L10n.text("无法播放"), message: L10n.text("请确认影片仍在媒体库中，并检查 MoviePilot 与网盘连接。"),
+      preferredStyle: .alert)
+    alert.addAction(UIAlertAction(title: L10n.text("好"), style: .default))
+    presenter.present(alert, animated: true)
+  }
+
+  /// 只接受媒体服务器条目 ID 和可展示标题，拒绝不完整的电视剧季集信息。
+  private static func isValidPlaybackRequest(_ request: PlaybackOpenPayload) -> Bool {
+    let itemId = request.itemId
+    let safeItemId =
+      itemId.range(
+        of:
+          "^(?:[A-Za-z0-9._:-]{1,128}|/library/metadata/[A-Za-z0-9._:-]{1,128}|file\\.[A-Za-z0-9_-]{64,4096})$",
+        options: .regularExpression) != nil
+    let safeTitle =
+      !request.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      && request.title.utf8.count <= 256
+      && !request.title.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+    let safeServer =
+      request.server.map {
+        !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+          && $0.utf8.count <= 128
+          && !$0.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+      } ?? true
+    let seasonAndEpisodeMatch =
+      (request.season == nil && request.episode == nil)
+      || (request.season.map { (0...999).contains($0) } == true
+        && request.episode.map { (0...9999).contains($0) } == true)
+    return safeItemId && safeTitle && safeServer && seasonAndEpisodeMatch
   }
 
   /// 固定 JS 入口使用参数传递，不把用户路径或载荷拼接为可执行代码。
@@ -885,6 +1109,9 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
     cardMenus.invalidate()
     standaloneMenus.invalidate()
     documentID = UUID()
+    cancelPlaybackRequest()
+    playbackNegotiated = false
+    streamAccessToken = nil
     WidgetService.shared.endSession(instanceId: instance.id, clear: false)
     pendingProcessRecovery = false
     timeout?.invalidate()
@@ -903,6 +1130,8 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
     standaloneMenus.invalidate()
     cardMenusNegotiated = false
     standaloneMenusNegotiated = false
+    playbackNegotiated = false
+    cancelPlaybackRequest()
     timeout?.invalidate()
     lastConfirmedURL = nil
     documentID = UUID()
@@ -948,7 +1177,7 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
         self.contentReady = true
         self.completeStartupIfReady()
       } else {
-        self.fail("页面资源未能完成加载，请检查连接后重试。")
+        self.fail(L10n.text("页面资源未能完成加载，请检查连接后重试。"))
       }
     }
   }
@@ -984,7 +1213,7 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
     startupTimeout = Timer.scheduledTimer(withTimeInterval: 45, repeats: false) { [weak self] _ in
       MainActor.assumeIsolated {
         guard let self, self.startupPending else { return }
-        self.fail("页面资源或 App 导航未能就绪。请检查网络，并确认实例前端已更新后重试。")
+        self.fail(L10n.text("页面资源或 App 导航未能就绪。请检查网络，并确认实例前端已更新后重试。"))
       }
     }
   }
@@ -1173,7 +1402,8 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
       return
     }
     let alert = UIAlertController(title: "MoviePilot", message: message, preferredStyle: .alert)
-    alert.addAction(UIAlertAction(title: "好", style: .default) { _ in completionHandler() })
+    alert.addAction(
+      UIAlertAction(title: L10n.text("好"), style: .default) { _ in completionHandler() })
     shell.present(alert, animated: true)
   }
 
@@ -1188,8 +1418,10 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
       return
     }
     let alert = UIAlertController(title: "MoviePilot", message: message, preferredStyle: .alert)
-    alert.addAction(UIAlertAction(title: "取消", style: .cancel) { _ in completionHandler(false) })
-    alert.addAction(UIAlertAction(title: "确定", style: .default) { _ in completionHandler(true) })
+    alert.addAction(
+      UIAlertAction(title: L10n.text("取消"), style: .cancel) { _ in completionHandler(false) })
+    alert.addAction(
+      UIAlertAction(title: L10n.text("确定"), style: .default) { _ in completionHandler(true) })
     shell.present(alert, animated: true)
   }
 
@@ -1205,9 +1437,10 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
     }
     let alert = UIAlertController(title: "MoviePilot", message: prompt, preferredStyle: .alert)
     alert.addTextField { $0.text = defaultText }
-    alert.addAction(UIAlertAction(title: "取消", style: .cancel) { _ in completionHandler(nil) })
     alert.addAction(
-      UIAlertAction(title: "确定", style: .default) { [weak alert] _ in
+      UIAlertAction(title: L10n.text("取消"), style: .cancel) { _ in completionHandler(nil) })
+    alert.addAction(
+      UIAlertAction(title: L10n.text("确定"), style: .default) { [weak alert] _ in
         completionHandler(alert?.textFields?.first?.text)
       })
     shell.present(alert, animated: true)
@@ -1301,8 +1534,8 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
     while let presented = presenter.presentedViewController { presenter = presented }
     guard !(presenter is UIAlertController) else { return }
     let alert = UIAlertController(
-      title: "下载未完成", message: "请检查网络后，在原页面重新选择下载。", preferredStyle: .alert)
-    alert.addAction(UIAlertAction(title: "好", style: .default))
+      title: L10n.text("下载未完成"), message: L10n.text("请检查网络后，在原页面重新选择下载。"), preferredStyle: .alert)
+    alert.addAction(UIAlertAction(title: L10n.text("好"), style: .default))
     presenter.present(alert, animated: true)
   }
 }
@@ -1311,6 +1544,15 @@ final class WebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDown
 private struct ReadyPayload: Decodable {
   let majors: [Int]
   let capabilities: [String]
+}
+
+/// 当前文档请求的播放条目和可选电视剧季集号。
+private struct PlaybackOpenPayload: Decodable {
+  let itemId: String
+  let title: String
+  let server: String?
+  let season: Int?
+  let episode: Int?
 }
 
 /// 网页确认的布局代次与原生准备阶段必须一致。
